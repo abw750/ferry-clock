@@ -64,15 +64,46 @@ async function pollOnce() {
 
     // capacities by vessel name
     const capByVessel = {};
+    const norm = s => String(s || "")
+    .toLowerCase()
+    .replace(/^m\/?v\.?\s+/i, "")
+    .replace(/\s*\(.*\)\s*$/, "")
+    .trim();
+
+    // Per-vessel overrides when the feed’s deck spaces don’t match app capacity
+    const CAP_OVERRIDES = {
+    tacoma: 197,
+    wenatchee: 197
+    };
+
     (Array.isArray(stats) ? stats : []).forEach(v => {
-      const total = (v.RegDeckSpace || 0) + (v.TallDeckSpace || 0);
-      if (v.VesselName) capByVessel[v.VesselName] = total;
-    });
+    const deckTotal = Number(v.RegDeckSpace || 0) + Number(v.TallDeckSpace || 0);
+
+    // Prefer VehicleCount if provided, else deck spaces, else MaxVehicleCount
+    let total = (v.VehicleCount != null ? Number(v.VehicleCount) : null);
+    if (total == null) total = (deckTotal || null);
+    if (total == null && v.MaxVehicleCount != null) total = Number(v.MaxVehicleCount);
+
+    const nameRaw = v.VesselName || "";
+    const nameKey = norm(nameRaw);
+
+    // Apply override last
+    if (nameKey in CAP_OVERRIDES) total = CAP_OVERRIDES[nameKey];
+
+    if (nameRaw) capByVessel[nameKey] = (typeof total === "number" && isFinite(total)) ? total : null;
+});
+
+
+
 
     // schedule today => TerminalCombos[*].Times[*].DepartingTime
     const tObj = Array.isArray(todayRaw) ? todayRaw[0] : todayRaw;
     const combos = Array.isArray(tObj?.TerminalCombos) ? tObj.TerminalCombos : [];
     const now = Date.now();
+    const SEA_ID = Number(SEA_TERMINAL_ID);
+    const BI_ID  = Number(BI_TERMINAL_ID);
+
+
 
     // build nearest departure per departing terminal
     const entries = combos.flatMap(c => {
@@ -87,10 +118,12 @@ async function pollOnce() {
       const next = sorted.find(x => x.depTs.getTime() >= now) || sorted[sorted.length - 1];
       if (!next) return [];
 
-      const direction =
-        depTid === Number(SEA_TERMINAL_ID) ? "Leave Seattle" :
-        depTid === Number(BI_TERMINAL_ID)  ? "Leave Bainbridge Island" :
+        // WSDOT fixed IDs: 3 = Seattle, 7 = Bainbridge Island
+        const direction =
+        depTid === 3 ? "Leave Seattle" :
+        depTid === 7 ? "Leave Bainbridge Island" :
         `Leave ${c.DepartingTerminalName || depTid}`;
+
 
       return [{
         direction,
@@ -107,8 +140,9 @@ async function pollOnce() {
       const i = list.findIndex(x => x.dep.getTime() >= now);
       return i >= 0 ? list[i] : list[list.length-1];
     }
-    const nextSEA = pickNearest(entries, SEA_TERMINAL_ID);
-    const nextBI  = pickNearest(entries, BI_TERMINAL_ID);
+    const nextSEA = pickNearest(entries, SEA_ID);
+    const nextBI  = pickNearest(entries, BI_ID);
+
 
     // terminal sailings space => array of terminals; each has DepartingSpaces[*]
     function extractTerminal(spaceArr, terminalId) {
@@ -136,11 +170,13 @@ async function pollOnce() {
 
       return match.DisplayDriveUpSpace ? (match.DriveUpSpaceCount ?? null) : null;
     }
-    const seaTerminalObj = extractTerminal(sea, SEA_TERMINAL_ID);
-    const biTerminalObj  = extractTerminal(bi,  BI_TERMINAL_ID);
+    const seaTerminalObj = extractTerminal(sea, SEA_ID);
+    const biTerminalObj  = extractTerminal(bi,  BI_ID);
 
-    const seaAvail = nextSEA ? matchSpaceFromTerminal(seaTerminalObj, nextSEA.dep, BI_TERMINAL_ID) : null;
-    const biAvail  = nextBI  ? matchSpaceFromTerminal(biTerminalObj,  nextBI.dep,  SEA_TERMINAL_ID) : null;
+
+    const seaAvail = nextSEA ? matchSpaceFromTerminal(seaTerminalObj, nextSEA.dep, BI_ID) : null;
+    const biAvail  = nextBI  ? matchSpaceFromTerminal(biTerminalObj,  nextBI.dep,  SEA_ID) : null;
+
 
     // live vessel ETAs and last arrivals
     const etaByVessel = {};
@@ -155,23 +191,130 @@ async function pollOnce() {
       }
     });
 
-    function shape(row, driveUpAvail) {
-      if (!row) return null;
-      const vessel = row.vessel || null;
-      const capacity = vessel ? capByVessel[vessel] ?? null : null;
-      return {
-        vessel,
-        direction: row.direction || null,
-        departureTime: hhmm(row.dep),
-        estimatedArrivalTime: hhmm(etaByVessel[vessel]),
-        actualArrivalTime: hhmm(arrivedByVessel[vessel]),
-        carSlotsTotal: capacity,
-        carSlotsAvailable: driveUpAvail,
-      };
+    // Live maps:
+    // 1) by route: "<depId>-<arrId>" -> {...}
+    // 2) by vessel: "<VesselName>" -> { depId, arrId, leftDock, eta }
+    const liveByRoute = {};
+    const liveByVessel = {};
+
+    (Array.isArray(locs) ? locs : []).forEach(v => {
+    const depId = Number(v.DepartingTerminalID ?? v.OriginTerminalID ?? 0);
+    const arrId = Number(v.ArrivingTerminalID  ?? v.DestinationTerminalID ?? 0);
+    if (!depId || !arrId) return;
+
+    const vesselName = String(v.VesselName || "");
+    const leftDock   = parseWsdotDate(v.LeftDock ?? v.DepartedUTC ?? v.DepartureTime);
+    const eta        = parseWsdotDate(v.Eta ?? v.ETA ?? v.EstimatedArrival);
+
+    liveByRoute[`${depId}-${arrId}`] = { vesselName, leftDock, eta };
+    if (vesselName) liveByVessel[vesselName] = { depId, arrId, leftDock, eta };
+    });
+
+
+
+
+    function shape(row, driveUpAvail, destTid) {
+
+    if (!row) return null;
+
+    // Live match for this specific direction (departing terminal -> destination terminal)
+    const liveKey = `${row.termId}-${Number(destTid)}`;
+    const live = liveByRoute[liveKey] || null;
+
+    // Vessel and capacities
+    const vessel = (live?.vesselName && live.vesselName.trim()) ? live.vesselName : (row.vessel || row.Vessel || row.BoatName || "");
+    const capacity = vessel ? (capByVessel[norm(vessel)] ?? null) : null;
+
+    // Times
+    // row.dep is a Date object you built earlier from WSDOT (next scheduled or current trip’s dep)
+    const scheduledDepartureTime_local = hhmm(row.dep);         // schedule
+    const liveDepart_local            = hhmm(live?.leftDock);   // live actual depart, if in transit
+    let eta_local = live?.eta ? hhmm(live.eta) : null; // only when live matches this route
+        if (live?.leftDock && live?.eta && live.eta < live.leftDock) eta_local = null; // guard: ETA cannot precede depart
+    const arr_local                   = hhmm(arrivedByVessel[vessel]);            // last actual arrival if present
+    const status = live?.leftDock ? "inTransit" : "scheduled";
+
+    // Final displayed departure time: prefer live depart when present
+    const departure_local = liveDepart_local || scheduledDepartureTime_local;
+
+
+    // Car space
+    const carSlotsTotal     = capacity;
+    const carSlotsAvailable = (typeof driveUpAvail === "number") ? driveUpAvail : null;
+
+    // Prefer live dep/arr by vessel when underway; else fall back to scheduled IDs
+    let originId = row.termId;
+    let destId   = Number(destTid);
+
+    // Use liveByVessel map built in pollOnce()
+    const liveV = vessel ? liveByVessel[vessel] : null;
+    if (liveV && liveV.leftDock) {
+    if (typeof liveV.depId === "number" && typeof liveV.arrId === "number" && liveV.depId && liveV.arrId) {
+        originId = liveV.depId;
+        destId   = liveV.arrId;
+    }
     }
 
-    const summary = [shape(nextSEA, seaAvail), shape(nextBI, biAvail)].filter(Boolean);
-    cache = { summary, lastError: null, lastFetchedAt: Date.now() };
+    // Names by terminal ID (WSDOT: 3=Seattle, 7=Bainbridge Island)
+    const fromName =
+    originId === 7 ? "Seattle" :
+    originId === 3 ? "Bainbridge Island" : null;
+
+    const toName =
+    destId === 3 ? "Bainbridge Island" :
+    destId === 7 ? "Seattle" : null;
+
+    // Direction string
+    const direction = (fromName && toName)
+    ? `${fromName} → ${toName}`
+    : (row.direction || row.Direction || row.SailingDir || "");
+
+
+
+    return {
+        vessel,
+        direction,
+
+        // Keep existing keys your UI already reads
+        departureTime: departure_local,               // live when available, else schedule
+        estimatedArrivalTime: eta_local,
+        actualArrivalTime: arr_local,
+        carSlotsTotal,
+        carSlotsAvailable,
+
+        // Add explicit fields for clarity if you want the UI to switch logic later
+
+        scheduledDepartureTime: scheduledDepartureTime_local,
+        actualDepartureTime: liveDepart_local || null,
+
+        status,
+        originTerminalId: row.termId,
+        destinationTerminalId: Number(destTid),
+
+        // Debug passthrough of the upstream row (leave if useful)
+        _row: row
+    };
+    }
+
+
+    const summary = [
+      // Seattle -> Bainbridge
+      nextSEA ? shape(nextSEA, seaAvail, BI_ID) : null,
+      // Bainbridge -> Seattle
+      nextBI  ? shape(nextBI,  biAvail,  SEA_ID) : null
+    ].filter(Boolean);
+
+    cache = {
+        summary,
+        lastError: null,
+        lastFetchedAt: Date.now(),
+        debug: {
+            locs, entries, nextSEA, nextBI, seaTerminalObj, biTerminalObj,
+            capByVessel,            // add for verification
+            stats                   // raw vessel stats for field inspection
+  }
+};
+
   } catch (e) {
     cache.lastError = e.message || String(e);
   }
@@ -183,6 +326,55 @@ pollOnce(); // kick off immediately
 
 // API
 app.get("/api/summary", (req, res) => res.json(cache.summary));
+app.get("/api/raw", (req, res) => res.json(cache));
+// Shows the live vessel fields we need, from the existing cache.debug.locs
+app.get("/api/peek", (req, res) => {
+  try {
+    const locs = Array.isArray(cache?.debug?.locs) ? cache.debug.locs : [];
+    const out = locs.map(l => ({
+      vesselName: String(l?.VesselName ?? ""),
+      departingTerminalId: Number(l?.DepartingTerminalID ?? l?.OriginTerminalID ?? NaN),
+      arrivingTerminalId: Number(l?.ArrivingTerminalID ?? l?.DestinationTerminalID ?? NaN),
+      leftDock: l?.LeftDock ?? l?.DepartedUTC ?? l?.DepartureTime ?? null,
+      eta: l?.Eta ?? l?.ETA ?? l?.EstimatedArrival ?? null,
+      atDock: Boolean(l?.AtDock ?? (l?.Status === "Docked"))
+    }));
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: "peek failed", detail: String(e?.message || e) });
+  }
+});
+
+// Quick probe: raw stats for a vessel (defaults to Tacoma).
+// Usage: /api/peekStats?v=Tacoma
+app.get("/api/peekStats", async (req, res) => {
+  try {
+    const q = String(req.query.v || "Tacoma").trim().toLowerCase();
+    const stats = await getJson(URLS.stats);
+    const match = (Array.isArray(stats) ? stats : []).find(s => {
+      const name = String(s?.VesselName || "").trim().toLowerCase()
+        .replace(/^m\/?v\.?\s+/i, "");
+      return name === q;
+    });
+    if (!match) return res.json({ error: "vessel not found", query: q });
+
+    // Return all numeric-looking fields to see what 270 comes from
+    const numeric = {};
+    Object.keys(match).forEach(k => {
+      const v = match[k];
+      if (typeof v === "number") numeric[k] = v;
+    });
+
+    res.json({
+      vessel: match.VesselName || null,
+      numeric,
+      deckSum: Number(match.RegDeckSpace || 0) + Number(match.TallDeckSpace || 0)
+    });
+  } catch (e) {
+    res.status(500).json({ error: "peekStats failed", detail: String(e?.message || e) });
+  }
+});
+
 app.get("/api/status",  (req, res) => res.json({
   lastFetchedAt: cache.lastFetchedAt,
   lastError: cache.lastError,
