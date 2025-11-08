@@ -1,0 +1,14 @@
+:root { font-family: system-ui, Arial, sans-serif; }
+body { margin: 0; padding: 16px; }
+header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+h1 { font-size: 20px; margin: 0; }
+.controls { display: flex; gap: 12px; align-items: center; }
+.muted { color: #666; font-size: 12px; }
+button { padding: 6px 10px; border: 1px solid #ccc; background: #f6f6f6; cursor: pointer; }
+button:hover { background: #eee; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { border-bottom: 1px solid #ddd; padding: 8px 10px; text-align: left; }
+th { font-weight: 600; }
+td.na { color: #999; }
+.error { color: #b00020; }

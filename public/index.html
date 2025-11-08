@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Ferry Watch</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="/styles.css" rel="stylesheet" />
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Ferry Watch</h1>
+    <div class="controls">
+      <button id="refresh">Refresh</button>
+      <button id="toggle">Show raw</button>
+      <span id="next" class="muted"></span>
+    </div>
+  </header>
+
+  <div class="statusbar">
+    <span id="status">Idle</span>
+    <span id="count" class="muted"></span>
+  </div>
+
+  <pre id="output" class="output" aria-live="polite"></pre>
+</body>
+</html>
