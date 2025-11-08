@@ -1,14 +1,14 @@
 :root { font-family: system-ui, Arial, sans-serif; }
 body { margin: 0; padding: 16px; }
-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-h1 { font-size: 20px; margin: 0; }
-.controls { display: flex; gap: 12px; align-items: center; }
+header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+h1 { margin: 0; font-size: 20px; }
+.controls { display: flex; gap: 8px; align-items: center; }
+.statusbar { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
 .muted { color: #666; font-size: 12px; }
 button { padding: 6px 10px; border: 1px solid #ccc; background: #f6f6f6; cursor: pointer; }
 button:hover { background: #eee; }
-
-table { width: 100%; border-collapse: collapse; }
-th, td { border-bottom: 1px solid #ddd; padding: 8px 10px; text-align: left; }
-th { font-weight: 600; }
-td.na { color: #999; }
-.error { color: #b00020; }
+.output { white-space: pre; border: 1px solid #ddd; padding: 10px; border-radius: 4px; min-height: 200px; }
+.err { color: #b00020; }
+table tr:nth-child(even) { background: #f9f9f9; }
+table th { background: #f0f0f0; }
+table td, table th { border: 1px solid #ddd; padding: 6px 8px; }

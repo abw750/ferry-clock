@@ -12,8 +12,8 @@ app.use(express.static("public"));
 const {
   WSDOT_API_KEY: KEY,
   ROUTE_ID = "5",
-  SEA_TERMINAL_ID = "7",
-  BI_TERMINAL_ID = "3",
+  SEA_TERMINAL_ID = "3",
+  BI_TERMINAL_ID = "7",
   POLL_MS = "60000",
 } = process.env;
 
@@ -118,10 +118,10 @@ async function pollOnce() {
       const next = sorted.find(x => x.depTs.getTime() >= now) || sorted[sorted.length - 1];
       if (!next) return [];
 
-        // WSDOT fixed IDs: 3 = Seattle, 7 = Bainbridge Island
+        // WSDOT fixed IDs: 7 = Seattle, 3 = Bainbridge Island
         const direction =
-        depTid === 3 ? "Leave Seattle" :
-        depTid === 7 ? "Leave Bainbridge Island" :
+        depTid === 7 ? "Leave Seattle" :
+        depTid === 3 ? "Leave Bainbridge Island" :
         `Leave ${c.DepartingTerminalName || depTid}`;
 
 
@@ -255,7 +255,7 @@ async function pollOnce() {
     }
     }
 
-    // Names by terminal ID (WSDOT: 3=Seattle, 7=Bainbridge Island)
+    // Names by terminal ID (WSDOT: 7=Seattle, 3=Bainbridge Island)
     const fromName =
     originId === 7 ? "Seattle" :
     originId === 3 ? "Bainbridge Island" : null;
