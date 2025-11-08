@@ -1,3 +1,6 @@
+// public/app.js — UI table + clock wiring (defensive)
+console.log("app.js loaded v=fc4");
+
 const els = {
   out: document.getElementById("output"),
   status: document.getElementById("status"),
@@ -11,14 +14,19 @@ const INTERVAL_MS = 60_000;
 let nextAt = 0;
 let countdownTimer = null;
 let showRaw = false;
+let tableEl = null; // created on demand
 
 init();
 
 function init() {
+  if (!els.refreshBtn || !els.toggleBtn) {
+    console.error("app.js: required DOM elements missing");
+    return;
+  }
   els.refreshBtn.addEventListener("click", doRefresh);
   els.toggleBtn.addEventListener("click", () => {
     showRaw = !showRaw;
-    els.toggleBtn.textContent = showRaw ? "Show flat" : "Show raw";
+    els.toggleBtn.textContent = showRaw ? "Show table" : "Show raw";
     fetchAndRender().catch(noop);
   });
   fetchAndRender().catch(noop);
@@ -31,7 +39,7 @@ function scheduleLoop() {
   countdownTimer = setInterval(() => {
     const msLeft = Math.max(0, nextAt - Date.now());
     const sLeft = Math.ceil(msLeft / 1000);
-    els.next.textContent = `next in ${sLeft}s`;
+    if (els.next) els.next.textContent = `next in ${sLeft}s`;
     if (msLeft <= 0) {
       clearInterval(countdownTimer);
       fetchAndRender().catch(noop).finally(scheduleLoop);
@@ -55,30 +63,154 @@ async function fetchAndRender() {
     const ts = status?.lastFetchedAt ? new Date(status.lastFetchedAt).toLocaleTimeString() : "n/a";
     setStatus(`Fetched at ${ts}`);
   }
+
   if (showRaw) {
     const raw = await getJson("/api/raw");
+    ensurePre();
     els.out.textContent = pretty(raw);
-    els.count.textContent = `${sizeOf(raw)} fields`;
-  } else {
-    const flat = await getJson("/api/flat");
-    els.out.textContent = renderFlat(flat);
-    els.count.textContent = `${Object.keys(flat || {}).length} items`;
+    els.count.textContent = countRaw(raw);
+    return;
   }
+
+  // table view using /api/summary
+  let summary = await getJson("/api/summary");
+  if (!Array.isArray(summary)) summary = [];
+
+  // DEBUG: log first two ferry rows for verification
+  (function() {
+    const slice = summary.slice(0, 2);
+    const names   = slice.map(r => r?.vessel || null);
+    const origins = slice.map(r => r?.originTerminalId || null);
+    const dests   = slice.map(r => r?.destinationTerminalId || null);
+    const status  = slice.map(r => r?.status || null);
+    console.log("summary[0..1]", { names, origins, dests, status });
+  })();
+
+  ensureTable();
+  renderSummaryTable(summary);
+
+  // update the clock, if available (never throw)
+  try {
+    if (window.ferry && typeof window.ferry.setData === "function" && typeof window.ferry.render === "function") {
+      window.ferry.setData(summary);
+      window.ferry.render();
+    } else if (typeof window.updateFerryClock === "function") {
+      window.updateFerryClock(summary);
+    }
+  }
+
+  catch (e) {
+    console.warn("ferry render failed:", e);
+  }
+
+  els.count.textContent = `${summary.length} rows`;
 }
 
-function renderFlat(obj) {
-  if (!obj || typeof obj !== "object") return "(no data)";
-  const keys = Object.keys(obj).sort();
-  return keys.map(k => `${k}: ${format(obj[k])}`).join("\n");
+// ---------- rendering ----------
+
+function ensureTable() {
+  if (tableEl) return;
+  tableEl = document.createElement("table");
+  tableEl.setAttribute("id", "summaryTable");
+  tableEl.style.width = "100%";
+  tableEl.style.borderCollapse = "collapse";
+
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  const cols = [
+    "Vessel",
+    "Direction",
+    "Scheduled departure",
+    "Actual departure time",
+    "Estimated Arrival Time",
+    "Actual time of arrival",
+    "Car slots total",
+    "Car slots available",
+    "Status",
+  ];
+
+  cols.forEach(c => {
+    const th = document.createElement("th");
+    th.textContent = c;
+    th.style.textAlign = "left";
+    th.style.border = "1px solid #ddd";
+    th.style.padding = "6px 8px";
+    th.style.fontSize = "14px";
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  tableEl.appendChild(thead);
+
+  tableEl.appendChild(document.createElement("tbody"));
+
+  // swap the <pre id="output"> for the table, keep a hidden pre for raw view
+  els.out.replaceWith(tableEl);
+  const pre = document.createElement("pre");
+  pre.id = "output";
+  pre.className = "output";
+  pre.style.display = "none";
+  tableEl.after(pre);
+  els.out = pre;
 }
-function format(v) {
-  if (v === null) return "null";
-  if (v === undefined) return "undefined";
-  if (typeof v === "object") return JSON.stringify(v);
-  return String(v);
+
+function ensurePre() {
+  if (!els.out || els.out.tagName !== "PRE") {
+    const pre = document.getElementById("output");
+    if (pre) {
+      els.out = pre;
+      els.out.style.display = "";
+    } else {
+      els.out = document.createElement("pre");
+      els.out.id = "output";
+      els.out.className = "output";
+      tableEl ? tableEl.after(els.out) : document.body.appendChild(els.out);
+    }
+  }
+  if (tableEl) { tableEl.remove(); tableEl = null; }
 }
+
+function renderSummaryTable(rows) {
+  const tbody = tableEl.querySelector("tbody");
+  tbody.innerHTML = "";
+  const safe = rows.slice(0, 2); // deterministic two rows
+  safe.forEach(r => {
+    const tr = document.createElement("tr");
+    const cells = [
+      nz(r?.vessel),
+      nz(r?.direction),
+      nz(r?.scheduledDepartureTime),   // explicitly scheduled
+      nz(r?.actualDepartureTime),      // new column
+      nz(r?.estimatedArrivalTime),
+      nz(r?.actualArrivalTime),
+      nzi(r?.carSlotsTotal),
+      nzi(r?.carSlotsAvailable),
+      nz(r?.status === "inTransit" ? "Underway" : "At dock"),
+    ];
+
+
+    cells.forEach(val => {
+      const td = document.createElement("td");
+      td.textContent = val;
+      td.style.border = "1px solid #ddd";
+      td.style.padding = "6px 8px";
+      td.style.fontSize = "14px";
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+// ---------- helpers ----------
+
+function nz(v) { return v == null || v === "" ? "—" : String(v); }
+function nzi(v) { return Number.isFinite(v) ? String(v) : "—"; }
+
 function pretty(v) { try { return JSON.stringify(v, null, 2); } catch { return String(v); } }
-function sizeOf(v) { return v && typeof v === "object" ? Object.keys(v).length : 1; }
+function countRaw(v) {
+  if (Array.isArray(v)) return `${v.length} items`;
+  if (v && typeof v === "object") return `${Object.keys(v).length} fields`;
+  return "1 value";
+}
 
 async function getJson(url) {
   try {
@@ -91,6 +223,7 @@ async function getJson(url) {
   }
 }
 function setStatus(msg, isErr = false) {
+  if (!els.status) return;
   els.status.textContent = msg;
   els.status.className = isErr ? "err" : "";
 }
