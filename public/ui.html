@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Ferry UI – Minimal Test</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
+    label, input, button { font-size: 16px; }
+    table { border-collapse: collapse; margin-top: 12px; width: 100%; max-width: 900px; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+    .error { color: #a00; margin-top: 8px; white-space: pre-wrap; }
+    .hint { color: #555; font-size: 14px; margin-top: 6px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .row input { flex: 1 1 480px; padding: 6px 8px; }
+  </style>
+</head>
+<body>
+  <h1>Ferry Data Tester</h1>
+  <p id="stamp" class="hint">Last updated: never</p>
+
+
+  <div class="row">
+    <label for="apiUrl">API URL:</label>
+    <input id="apiUrl" type="text" placeholder="Paste your API endpoint here (e.g., http://localhost:3000/api/ferry)" />
+    <button id="loadBtn">Load</button>
+  </div>
+  <div class="hint">This page only keeps these fields: Vessel, Direction, Departure time, Estimated Arrival Time, Actual time of arrival, Car slots total, Car slots available.</div>
+  <div id="error" class="error" hidden></div>
+  <button id="rawBtn" type="button">Show raw</button>
+  <pre id="rawBox" hidden style="margin-top:8px; padding:8px; border:1px solid #ddd; max-width:900px; overflow:auto;"></pre>
+
+  <table id="resultTable" hidden>
+    <thead>
+      <tr>
+        <th>Vessel</th>
+        <th>Direction</th>
+        <th>Departure</th>
+        <th>ETA</th>
+        <th>Actual Arrival</th>
+        <th>Car Slots (Total)</th>
+        <th>Car Slots (Available)</th>
+      </tr>
+    </thead>
+    <tbody id="resultBody"></tbody>
+  </table>
+
+  <script>
+    // Store last raw response for on-screen inspection
+    let lastRaw = null;
+    let refreshTimer = null;
+
+    // Safe getter
+    function get(obj, path, fallback = "") {
+      try {
+        return path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj) ?? fallback;
+      } catch { return fallback; }
+    }
+
+    // Normalize to the 7 columns we display
+    function normalizeRecords(raw) {
+      const arr =
+        Array.isArray(raw) ? raw :
+        Array.isArray(raw?.data) ? raw.data :
+        Array.isArray(raw?.results) ? raw.results :
+        Array.isArray(raw?.sailings) ? raw.sailings :
+        Array.isArray(raw?.items) ? raw.items : [];
+
+      return arr.map(item => {
+        const vessel =
+          get(item, "vessel") ||
+          get(item, "Vessel") ||
+          get(item, "BoatName") ||
+          get(item, "boat_name") ||
+          "";
+
+        const direction = (() => {
+          // Prefer explicit origin/destination if present
+          const from =
+            get(item, "fromTerminal") ||
+            get(item, "originTerminal") ||
+            get(item, "origin") ||
+            get(item, "from") ||
+            "";
+          const to =
+            get(item, "toTerminal") ||
+            get(item, "destinationTerminal") ||
+            get(item, "destination") ||
+            get(item, "to") ||
+            "";
+
+          if (from || to) {
+            if (from && to) return `${from} → ${to}`;
+            if (from) return `${from} → ?`;
+            if (to) return `? → ${to}`;
+          }
+
+          // Fall back to provided "direction" text
+          return (
+            get(item, "direction") ||
+            get(item, "Direction") ||
+            get(item, "SailingDir") || // numeric in some feeds
+            get(item, "sailing_direction") ||
+            ""
+          );
+        })();
+
+
+        const depart = (() => {
+          // Read backend status and times
+          const status =
+            get(item, "status") ||
+            get(item, "Status") ||
+            "";
+
+          const liveDep =
+            get(item, "actualDepartureTime") ||
+            get(item, "ActualDepartureTime") ||
+            "";
+
+          const schedDep =
+            get(item, "scheduledDepartureTime") ||
+            get(item, "ScheduledDepartureTime") ||
+            "";
+
+          const fallback =
+            get(item, "departureTime") ||
+            get(item, "DepartureTime") ||
+            get(item, "DepartTime") ||
+            get(item, "LeaveTime") ||
+            "";
+
+          // Rule:
+          // - If scheduled: show scheduled (or fallback) with " (next)".
+          // - If inTransit: show live actual departure; else fall back to scheduled/fallback.
+          if (status === "scheduled") {
+            const t = schedDep || fallback || "";
+            return t ? t + " (next)" : "";
+          }
+          return liveDep || schedDep || fallback || "";
+        })();
+
+
+
+        const eta =
+          get(item, "estimatedArrivalTime") ||     // your API key
+          get(item, "EstimatedArrival") ||
+          get(item, "estimatedArrival") ||
+          get(item, "EstimatedArrivalTime") ||
+          get(item, "EstArrival") ||
+          get(item, "ArrivalEstimate") ||
+          get(item, "ETA") ||
+          get(item, "eta") ||
+          "";
+
+        const actual =
+          get(item, "actualArrivalTime") ||        // your API key
+          get(item, "lastArrivalTime") ||          // optional alternates
+          get(item, "dockedAt") ||
+          get(item, "arrivalActual") ||
+          get(item, "ActualArrival") ||
+          get(item, "actualArrival") ||
+          get(item, "ActualArrivalTime") ||
+          get(item, "ArrivalTime") ||
+          get(item, "ArrivedTime") ||
+          get(item, "ATA") ||
+          get(item, "ata") ||
+          "";
+
+        const carsTotal =
+          get(item, "carSlotsTotal") ||
+          get(item, "CarSlotsTotal") ||
+          get(item, "MaxVehicleCount") ||
+          get(item, "vehicle_capacity") ||
+          "";
+
+        const carsAvail =
+          get(item, "carSlotsAvailable") ||
+          get(item, "CarSlotsAvailable") ||
+          get(item, "AvailableVehicleCount") ||
+          get(item, "vehicle_available") ||
+          "";
+
+        return { vessel, direction, depart, eta, actual, carsTotal, carsAvail };
+      });
+    }
+
+    async function fetchAndRender(url) {
+      const err = document.getElementById("error");
+      const table = document.getElementById("resultTable");
+      const tbody = document.getElementById("resultBody");
+      const rawBox = document.getElementById("rawBox");
+      err.hidden = true;
+      table.hidden = true;
+      tbody.innerHTML = "";
+
+      try {
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) throw new Error("HTTP " + res.status + " " + res.statusText);
+        const data = await res.json();
+
+        // save and show raw
+        lastRaw = data;
+        if (rawBox) rawBox.textContent = JSON.stringify(data, null, 2);
+
+        const rows = normalizeRecords(data);
+        if (!rows.length) {
+          err.textContent = "No rows found. Confirm the endpoint returns a list.";
+          err.hidden = false;
+          return;
+        }
+
+        rows.forEach(r => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${r.vessel}</td>
+            <td>${r.direction}</td>
+            <td>${r.depart}</td>
+            <td>${r.eta}</td>
+            <td>${r.actual}</td>
+            <td>${r.carsTotal}</td>
+            <td>${r.carsAvail}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+
+        table.hidden = false;
+        document.getElementById("stamp").textContent = "Last updated: " + new Date().toLocaleTimeString();
+
+      } catch (e) {
+        err.textContent = String(e && e.message ? e.message : e);
+        err.hidden = false;
+      }
+    }
+
+    // Toggle raw view
+    document.getElementById("rawBtn")?.addEventListener("click", () => {
+      const rawBox = document.getElementById("rawBox");
+      const btn = document.getElementById("rawBtn");
+      if (!rawBox || !btn) return;
+      rawBox.hidden = !rawBox.hidden;
+      btn.textContent = rawBox.hidden ? "Show raw" : "Hide raw";
+    });
+
+    // Load button + start 60s auto-refresh
+    document.getElementById("loadBtn").addEventListener("click", () => {
+      const url = document.getElementById("apiUrl").value.trim();
+      const err = document.getElementById("error");
+      if (!url) {
+        err.textContent = "Enter an API URL first.";
+        err.hidden = false;
+        return;
+      }
+      // first fetch now
+      fetchAndRender(url);
+      // clear any prior timer
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
+      // start new 60s refresh
+      refreshTimer = setInterval(() => fetchAndRender(url), 60000);
+    });
+
+  </script>
+</body>
+</html>
