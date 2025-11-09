@@ -30,24 +30,32 @@
 
     // --- clock hands (hour + minute), drawn above overlay ---
   const hands = ensure(svg, "g", { id: "clock-hands", stroke: "#222", "stroke-linecap": "round" });
-  const hourHand   = ensure(hands, "line", { id: "hand-hour",   x1: 200, y1: 200, x2: 200, y2: 130, "stroke-width": 5 });
-  const minuteHand = ensure(hands, "line", { id: "hand-minute", x1: 200, y1: 200, x2: 200, y2:  90, "stroke-width": 3 });
-  const pin        = ensure(hands, "circle", { cx: 200, cy: 200, r: 4, fill: "#222" });
+  const hourHand   = ensure(hands, "line", { id: "hand-hour",   x1: 200, y1: 200, x2: 200, y2: 105, stroke: "#231888ff", "stroke-width": 6 });
+  const minuteHand = ensure(hands, "line", { id: "hand-minute", x1: 200, y1: 200, x2: 200, y2: 65, stroke: "#231888ff", "stroke-width": 3 });
+  const secondHand = ensure(hands, "line", { id: "hand-second", x1: 200, y1: 200, x2: 200, y2: 25, stroke: "#b91c1c", "stroke-width": 2 });
+  const pin        = ensure(hands, "circle", { cx: 200, cy: 200, r: 4, fill: "#ee0a0aff" });
 
   function setRot(node, deg) {
     node.setAttribute("transform", `rotate(${deg} 200 200)`);
   }
-  function tick() {
-    const now = new Date();
-    const h = now.getHours() % 12;
-    const m = now.getMinutes();
-    const s = now.getSeconds();
-    const ha = (h + m / 60) * 30;   // 360/12
-    const ma = (m + s / 60) * 6;    // 360/60
-    setRot(hourHand, ha);
-    setRot(minuteHand, ma);
-  }
-  tick();
-  setInterval(tick, 1000);
+function tick() {
+  const now = new Date();
+  const s = now.getSeconds();
+  const m = now.getMinutes();
+  const h = now.getHours() % 12;
+  const ha = (h + m / 60) * 30;
+  const ma = (m + s / 60) * 6;
+
+  // 10 sub-steps per second
+  const sub = Math.floor((now.getMilliseconds() / 1000) * 10);
+  const sAdj = s + sub / 10;
+
+  setRot(hourHand, ha);
+  setRot(minuteHand, ma);
+  setRot(secondHand, sAdj * 6);
+}
+tick();
+setInterval(tick, 100); // 10 ticks per second
+
 
 })();
