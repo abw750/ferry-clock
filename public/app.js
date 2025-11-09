@@ -11,6 +11,43 @@ const els = {
 };
 
 const INTERVAL_MS = 60_000;
+
+// normalize actual-arrival field from API, with key scan fallback
+function getActualArrival(r) {
+  // common names first
+  const v =
+    r?.actualArrivalTime ??
+    r?.actualArrival ??
+    r?.arrivalTime ??
+    r?.actualTimeOfArrival ??
+    r?.actualArrivalDateTime ??
+    null;
+  if (v != null && v !== "") return v;
+
+  // fallback: scan any key containing "arriv"
+  const obj = r || {};
+  for (const k of Object.keys(obj)) {
+    if (/arriv/i.test(k)) {
+      const val = obj[k];
+      if (val != null && val !== "") return val;
+    }
+  }
+  return null;
+}
+
+
+// --- helpers (top-level) ---
+if (typeof nz !== "function") {
+  // fallback to avoid hard failures
+  window.nz = v => (v ?? "") !== "" ? String(v) : "—";
+}
+if (typeof nzi !== "function") {
+  window.nzi = v => {
+    const n = Number(v);
+    return Number.isFinite(n) ? String(n) : "—";
+  };
+}
+
 let nextAt = 0;
 let countdownTimer = null;
 let showRaw = false;
@@ -76,15 +113,47 @@ async function fetchAndRender() {
   let summary = await getJson("/api/summary");
   if (!Array.isArray(summary)) summary = [];
 
-  // DEBUG: log first two ferry rows for verification
-  (function() {
-    const slice = summary.slice(0, 2);
-    const names   = slice.map(r => r?.vessel || null);
-    const origins = slice.map(r => r?.originTerminalId || null);
-    const dests   = slice.map(r => r?.destinationTerminalId || null);
-    const status  = slice.map(r => r?.status || null);
-    console.log("summary[0..1]", { names, origins, dests, status });
-  })();
+// DEBUG: log first two ferry rows for verification
+(function() {
+  const slice = summary.slice(0, 2);
+  const names   = slice.map(r => r?.vessel || null);
+  const origins = slice.map(r => r?.originTerminalId || null);
+  const dests   = slice.map(r => r?.destinationTerminalId || null);
+  const status  = slice.map(r => r?.status || null);
+  console.log("summary[0..1]", { names, origins, dests, status });
+
+  // ARRIVAL FIELD DIAG
+slice.forEach((r, i) => {
+  const keys = Object.keys(r || {});
+  const arrivalKeys = keys.filter(k => /arriv/i.test(k));
+  const diag = {};
+  arrivalKeys.forEach(k => { diag[k] = r[k]; });
+  console.log(`ARRIVAL DIAG [${i}] ${r?.vessel || "?"}:`, diag);
+});
+// Tacoma-specific dump
+const tac = summary.find(r => r?.vessel === "Tacoma");
+console.log("ARRIVAL DIAG Tacoma full keys:", tac ? Object.keys(tac) : "not found");
+if (tac) {
+  const tdiag = {};
+  Object.keys(tac).forEach(k => { if (/arriv/i.test(k)) tdiag[k] = tac[k]; });
+  console.log("ARRIVAL DIAG Tacoma arrivals:", tdiag);
+}
+
+
+  // DIAG: scheduled rows lacking actual arrival across possible keys
+  const schedNoArr = summary.filter(r =>
+    String(r?.status || "").toLowerCase() !== "intransit" &&
+    !getActualArrival(r)
+  );
+  if (schedNoArr.length) {
+    console.log("DIAG scheduled-without-actualArrival:", schedNoArr.map(r => r.vessel));
+    schedNoArr.slice(0, 2).forEach((r, i) => {
+      console.log(`DIAG row[${i}] full:`, r);
+      console.log(`DIAG row[${i}] keys:`, Object.keys(r));
+    });
+  }
+})();
+
 
   ensureTable();
   renderSummaryTable(summary);
@@ -110,47 +179,51 @@ async function fetchAndRender() {
 
 function ensureTable() {
   if (tableEl) return;
-  tableEl = document.createElement("table");
-  tableEl.setAttribute("id", "summaryTable");
-  tableEl.style.width = "100%";
-  tableEl.style.borderCollapse = "collapse";
+  try {
+    tableEl = document.createElement("table");
+    tableEl.setAttribute("id", "summaryTable");
+    tableEl.style.width = "100%";
+    tableEl.style.borderCollapse = "collapse";
 
-  const thead = document.createElement("thead");
-  const hr = document.createElement("tr");
-  const cols = [
-    "Vessel",
-    "Direction",
-    "Scheduled departure",
-    "Actual departure time",
-    "Estimated Arrival Time",
-    "Actual time of arrival",
-    "Car slots total",
-    "Car slots available",
-    "Status",
-  ];
+    const thead = document.createElement("thead");
+    const hr = document.createElement("tr");
+    const cols = [
+      "Vessel",
+      "Direction",
+      "Scheduled departure",
+      "Actual departure time",
+      "Estimated Arrival Time",
+      "Actual time of arrival",
+      "Car slots total",
+      "Car slots available",
+      "Status"
+    ];
+    cols.forEach(c => {
+      const th = document.createElement("th");
+      th.textContent = c;
+      th.style.textAlign = "left";
+      th.style.border = "1px solid #ddd";
+      th.style.padding = "6px 8px";
+      th.style.fontSize = "14px";
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    tableEl.appendChild(thead);
 
-  cols.forEach(c => {
-    const th = document.createElement("th");
-    th.textContent = c;
-    th.style.textAlign = "left";
-    th.style.border = "1px solid #ddd";
-    th.style.padding = "6px 8px";
-    th.style.fontSize = "14px";
-    hr.appendChild(th);
-  });
-  thead.appendChild(hr);
-  tableEl.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    tableEl.appendChild(tbody);
 
-  tableEl.appendChild(document.createElement("tbody"));
-
-  // swap the <pre id="output"> for the table, keep a hidden pre for raw view
-  els.out.replaceWith(tableEl);
-  const pre = document.createElement("pre");
-  pre.id = "output";
-  pre.className = "output";
-  pre.style.display = "none";
-  tableEl.after(pre);
-  els.out = pre;
+    // swap the <pre id="output"> for the table, keep a hidden pre for raw view
+    els.out.replaceWith(tableEl);
+    const pre = document.createElement("pre");
+    pre.id = "output";
+    pre.className = "output";
+    pre.style.display = "none";
+    tableEl.after(pre);
+    els.out = pre;
+  } catch (err) {
+    console.error("table render error:", err);
+  }
 }
 
 function ensurePre() {
@@ -181,7 +254,7 @@ function renderSummaryTable(rows) {
       nz(r?.scheduledDepartureTime),   // explicitly scheduled
       nz(r?.actualDepartureTime),      // new column
       nz(r?.estimatedArrivalTime),
-      nz(r?.actualArrivalTime),
+      nz(getActualArrival(r)), 
       nzi(r?.carSlotsTotal),
       nzi(r?.carSlotsAvailable),
       nz(r?.status === "inTransit" ? "Underway" : "At dock"),
