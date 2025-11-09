@@ -47,6 +47,46 @@
   // stable vessel→slot map: 0 = top, 1 = bottom
   const _slotByVessel = Object.create(null);
 
+// choose best row for a vessel (prefer inTransit, else earliest upcoming sched within 24h)
+function bestRowForVessel(rows, vessel) {
+  const name = String(vessel || "").trim();
+  const subset = rows.filter(r => String(r?.vessel || "").trim() === name);
+  if (!subset.length) return null;
+
+  const inT = subset.find(r => String(r?.status || "").toLowerCase() === "intransit");
+  if (inT) return inT;
+
+  let best = null, bestT = Infinity;
+  for (const r of subset) {
+    const t = parseNextOccurrence(r?.scheduledDepartureTime)?.getTime();
+    if (t != null && t < bestT) { bestT = t; best = r; }
+  }
+  return best || subset[0];
+}
+
+// map slots -> vessel names using the stable assignment
+function vesselsBySlot() {
+  const map = [null, null];
+  for (const v in _slotByVessel) {
+    const s = _slotByVessel[v];
+    if (s === 0 || s === 1) map[s] = v;
+  }
+  return map;
+}
+
+// fallback: earliest upcoming scheduled departure within 24h, with optional vessel exclusion
+function earliestUpcoming(rows, excludeVessel = null) {
+  let best = null, bestT = Infinity;
+  const ex = excludeVessel ? String(excludeVessel).trim() : null;
+  for (const r of rows) {
+    const v = String(r?.vessel || "").trim();
+    if (ex && v === ex) continue;
+    const t = parseNextOccurrence(r?.scheduledDepartureTime)?.getTime();
+    if (t != null && t < bestT) { bestT = t; best = r; }
+  }
+  return best || (rows && rows[0]) || null;
+}
+
   // --- persist slot map so vessels never trade bars ---
 function loadSlotMap() {
   try { return JSON.parse(localStorage.getItem("ferrySlotMap") || "{}"); } catch { return {}; }
@@ -115,17 +155,22 @@ function assignSlots(rows) {
 
       ensureLabels();
 
-      // choose rows by stable slot map
-      const slotRows = [null, null];
-      for (const r of _rows) {
-        const v = (r && r.vessel && String(r.vessel).trim()) || null;
-        const slot = v != null ? _slotByVessel[v] : undefined;
-        if (slot === 0 && !slotRows[0]) slotRows[0] = r;
-        else if (slot === 1 && !slotRows[1]) slotRows[1] = r;
-      }
-      // fallback if mapping failed
-      if (!slotRows[0] && _rows[0]) slotRows[0] = _rows[0];
-      if (!slotRows[1] && _rows[1]) slotRows[1] = _rows[1];
+    // choose rows by stable slot map; backfill so lanes never disappear
+    const slotRows = [null, null];
+    const vs = vesselsBySlot();
+
+    // try per-vessel picks first
+    if (vs[0]) slotRows[0] = bestRowForVessel(_rows, vs[0]);
+    if (vs[1]) slotRows[1] = bestRowForVessel(_rows, vs[1]);
+
+    // backfill any missing slot with earliest upcoming, avoiding duplicate vessel
+    if (!slotRows[0]) slotRows[0] = earliestUpcoming(_rows, slotRows[1]?.vessel || null);
+    if (!slotRows[1]) slotRows[1] = earliestUpcoming(_rows, slotRows[0]?.vessel || null);
+
+    // final safety
+    if (!slotRows[0] && _rows[0]) slotRows[0] = _rows[0];
+    if (!slotRows[1] && _rows[1]) slotRows[1] = _rows[1];
+
 
       // 12 o'clock dock arcs: only when docked. No track when underway.
       if (dockTop) {
@@ -466,6 +511,42 @@ function drawRow(g, r, y) {
     return Number.isFinite(d.getTime()) ? d : null;
   }
   function clamp01(x) { return x <= 0 ? 0 : x >= 1 ? 1 : x; }
+// pick the next occurrence of an hh:mm AM/PM within the next 24h
+function parseNextOccurrence(hhmm) {
+  const base = parseTodayLocal(hhmm);
+  if (!base) return null;
+  const now = Date.now();
+  let t = base.getTime();
+  // if that time already passed by >~1 minute, roll it to tomorrow
+  if (t < now - 60 * 1000) t += 24 * 60 * 60 * 1000;
+  return new Date(t);
+}
+
+// --- time + progress helpers ---
+function computeProgress(actualDepartStr, etaStr) {
+  const t0 = parseNextOccurrence(actualDepartStr);
+  const t1 = parseNextOccurrence(etaStr);
+  if (!t0 || !t1) return null;
+  const a = t0.getTime(), b = t1.getTime();
+  if (!(b > a)) return null;
+  const now = Date.now();
+  return clamp01((now - a) / (b - a));
+}
+
+function computeDockProgress(actualArriveStr, schedDepartStr) {
+  const tD = parseNextOccurrence(schedDepartStr);
+  if (!tD) return null;
+
+  let tA = parseNextOccurrence(actualArriveStr);
+  if (!tA) {
+    // fallback dwell of 20 min ending at sched depart, roll if needed
+    tA = new Date(tD.getTime() - 20 * 60 * 1000);
+  }
+  if (!(tD.getTime() > tA.getTime())) return null;
+  const now = Date.now();
+  return clamp01((now - tA.getTime()) / (tD.getTime() - tA.getTime()));
+}
+
   function computeProgress(actualDepartStr, etaStr) {
     const t0 = parseTodayLocal(actualDepartStr);
     const t1 = parseTodayLocal(etaStr);
