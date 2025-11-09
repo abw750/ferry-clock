@@ -10,8 +10,8 @@
   };
 
   // 12 o'clock rim radii for dock arcs
-  const DOCK_OUTER_R = 192; // top slot
-  const DOCK_INNER_R = 186; // bottom slot
+  const DOCK_OUTER_R = 171; // top slot
+  const DOCK_INNER_R = 165; // bottom slot
 
   function drawDockTopArc(container, slotIndex, pct, color) {
     const r = slotIndex === 0 ? DOCK_OUTER_R : DOCK_INNER_R;
@@ -24,7 +24,7 @@
       const [x1, y1] = polar(CX, CY, r, end);
       container.appendChild(elNS("path", {
         d: `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`,
-        stroke: color, "stroke-width": 6, fill: "none", "stroke-linecap": "round"
+        stroke: color, "stroke-width": 8, fill: "none", "stroke-linecap": "round"
       }));
     }
   }
@@ -194,7 +194,6 @@ function assignSlots(rows) {
 
     }
   };
-
   // Back-compat shim
   window.updateFerryClock = function updateFerryClock(summaryRows) {
     window.ferry.setData(summaryRows);
