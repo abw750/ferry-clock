@@ -14,21 +14,22 @@
   ; // top slot
   const DOCK_INNER_R = 165; // bottom slot
 
-  function drawDockTopArc(container, slotIndex, pct, color) {
+    function drawDockTopArc(container, slotIndex, pct, color, startDeg) {
     const r = slotIndex === 0 ? DOCK_OUTER_R : DOCK_INNER_R;
-    // fill 0..360 from 12 o'clock (-90deg)
-    if (pct != null) {
-      const start = -90;
-      const end = start + 360 * clamp01(pct);
-      const large = Math.abs(end - start) > 180 ? 1 : 0;
-      const [x0, y0] = polar(CX, CY, r, start);
-      const [x1, y1] = polar(CX, CY, r, end);
-      container.appendChild(elNS("path", {
+    if (pct == null) return;
+
+    const start = Number.isFinite(startDeg) ? startDeg : -90; // default 12 o'clock
+    const end = start + 360 * clamp01(pct);
+    const large = Math.abs(end - start) > 180 ? 1 : 0;
+    const [x0, y0] = polar(CX, CY, r, start);
+    const [x1, y1] = polar(CX, CY, r, end);
+
+    container.appendChild(elNS("path", {
         d: `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`,
         stroke: color, "stroke-width": 8, fill: "none", "stroke-linecap": "round"
-      }));
+    }));
     }
-  }
+
 
   // strict actual-arrival accessor (no ETA fallback)
   function getActualArrivalLocal(r) {
@@ -44,6 +45,44 @@
   }
 
   // --- state ---
+
+  // sticky dock cache so arcs persist even if the API drops a row briefly
+const _dockCache = loadDockCache();
+function loadDockCache(){ try { return JSON.parse(localStorage.getItem("ferryDockCache")||"{}"); } catch { return {}; } }
+function saveDockCache(){ try { localStorage.setItem("ferryDockCache", JSON.stringify(_dockCache)); } catch {} }
+
+// underway test used by cache logic
+function isUnderwayRow(r){
+  const s = String(r?.status || "").toLowerCase();
+  return s === "intransit" || !!r?.actualDepartureTime || (!!r?.estimatedArrivalTime && r.estimatedArrivalTime !== "—");
+}
+
+// record last docked state; expires shortly after scheduled departure
+function upsertDockSnapshot(r){
+  const v = String(r?.vessel || "").trim(); if (!v) return;
+  if (isUnderwayRow(r)) return;
+  const depart = parseNextOccurrence(r?.scheduledDepartureTime); if (!depart) return;
+  const arrive = getActualArrivalLocal(r) || null;
+  _dockCache[v] = {
+    vessel: v,
+    scheduledDepartureTime: r?.scheduledDepartureTime || null,
+    actualArrivalTime: arrive,
+    originTerminalId: r?.originTerminalId ?? null,
+    destinationTerminalId: r?.destinationTerminalId ?? null,
+    direction: r?.direction || null,
+    status: "Docked",
+    _expiresAt: depart.getTime() + 5 * 60 * 1000 // keep 5 min past sched depart
+  };
+  saveDockCache();
+}
+
+function getDockSnapshot(v){
+  const s = _dockCache?.[String(v).trim()];
+  if (!s) return null;
+  if (Date.now() > (s._expiresAt || 0)) { delete _dockCache[String(v).trim()]; saveDockCache(); return null; }
+  return s;
+}
+
   let _rows = [];
   // stable vessel→slot map: 0 = top, 1 = bottom
   const _slotByVessel = Object.create(null);
@@ -121,15 +160,20 @@ function assignSlots(rows) {
 
 
   // --- public API ---
-  window.ferry = {
+    window.ferry = {
     setData(rows) {
-      _rows = Array.isArray(rows) ? rows : [];
-      assignSlots(_rows);
-      try {
+        _rows = Array.isArray(rows) ? rows : [];
+        assignSlots(_rows);
+
+        // update dock cache from current rows
+        for (const r of _rows) upsertDockSnapshot(r);
+
+        try {
         const names = _rows.slice(0, 2).map(r => r && r.vessel || null);
         console.log("ferry.setData:", _rows.length, names, "slots:", JSON.stringify(_slotByVessel));
-      } catch {}
+        } catch {}
     },
+
 
     render() {
       const dbg = _rows.slice(0, 2).map(r => r && ({
@@ -163,6 +207,10 @@ function assignSlots(rows) {
     // try per-vessel picks first
     if (vs[0]) slotRows[0] = bestRowForVessel(_rows, vs[0]);
     if (vs[1]) slotRows[1] = bestRowForVessel(_rows, vs[1]);
+    // if missing in live data, fall back to sticky dock snapshot
+    if (!slotRows[0] && vs[0]) slotRows[0] = getDockSnapshot(vs[0]);
+    if (!slotRows[1] && vs[1]) slotRows[1] = getDockSnapshot(vs[1]);
+
 
     // backfill any missing slot with earliest upcoming, avoiding duplicate vessel
     if (!slotRows[0]) slotRows[0] = earliestUpcoming(_rows, slotRows[1]?.vessel || null);
@@ -195,7 +243,8 @@ function assignSlots(rows) {
           if (rr && !underway) {
             const arrive = getActualArrivalLocal(rr);
             let pct = computeDockProgress(arrive, rr.scheduledDepartureTime);
-            drawDockTopArc(dockTop, slot, pct, scheme.light);
+            // start angle = minute hand at arrival minute when status flipped to docked
+            let start
           }
         }
       }
@@ -609,20 +658,39 @@ function polar(cx, cy, r, aDeg) {
 
 // ---- capacity pie helpers ----
 function drawCapacityPie(g, cx, cy, r, total, avail, color) {
-  const frac = total > 0 ? Math.max(0, Math.min(1, avail / total)) : 0;
+  // normalize
+  const T = Number.isFinite(total) ? Math.max(0, total) : 0;
+  const A = Number.isFinite(avail) ? Math.max(0, avail) : 0;
+
+  // guard: no total → show empty ring with "—"
+  if (T <= 0) {
+    g.appendChild(elNS("circle", { cx, cy, r, fill: "#fff", stroke: "#ddd", "stroke-width": 2 }));
+    const txt = elNS("text", { x: cx, y: cy + 4, "text-anchor": "middle", fill: "#888", "font-size": "12", "font-weight": "600" });
+    txt.textContent = "—";
+    g.appendChild(txt);
+    return;
+  }
+
+  // base
   g.appendChild(elNS("circle", { cx, cy, r, fill: color, stroke: "none" }));
-  if (frac < 1) {
-    const usedFrac = 1 - frac;
+
+  // fully empty → draw a solid white circle instead of a 360° arc
+  if (A === 0) {
+    g.appendChild(elNS("circle", { cx, cy, r, fill: "#fff", stroke: "none" }));
+  } else if (A < T) {
+    // partial used sector: white wedge for used capacity
+    const usedFrac = 1 - Math.max(0, Math.min(1, A / T));
     g.appendChild(elNS("path", {
       d: sectorPath(cx, cy, r, -90, -90 + usedFrac * 360),
       fill: "#fff"
     }));
   }
+  // label
   const txt = elNS("text", {
     x: cx, y: cy + 4, "text-anchor": "middle",
     fill: "#111", "font-size": "12", "font-weight": "600"
   });
-  txt.textContent = Number.isFinite(avail) ? String(avail) : "—";
+  txt.textContent = String(A);
   g.appendChild(txt);
 }
 
