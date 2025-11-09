@@ -153,9 +153,45 @@ function assignSlots(rows) {
           }
         }
       }
-
       drawRow(top,    slotRows[0] || null, 95);
       drawRow(bottom, slotRows[1] || null, 305);
+      // ---- capacity pies (20% of face diameter => radius 40) ----
+      const capG = layers.capacity;
+      if (capG) {
+        capG.innerHTML = "";
+
+        // pick next boat to load from each origin (SEA=7, BI=3)
+        const nextFrom = (originId) => {
+          const cand = _rows
+            .filter(r => Number(r?.originTerminalId) === originId && String(r?.status || "").toLowerCase() !== "intransit")
+            .filter(r => r?.scheduledDepartureTime)
+            .map(r => ({ r, t: parseTodayLocal(r.scheduledDepartureTime)?.getTime() || Infinity }))
+            .sort((a,b) => a.t - b.t);
+          return cand.length ? cand[0].r : null;
+        };
+
+        const rowSEA = nextFrom(7);
+        const rowBI  = nextFrom(3);
+
+        // geometry: centered on 3–9 axis, near labels
+        const R = 15;               // raduis of small circles pies
+        const yC = 200;
+        const xSeattle = CX + INWARD - 28;     // just left of "SEATTLE"
+        const xBain    = CX - INWARD + 28;     // just right of "BAINBRIDGE ISLAND"
+
+        if (rowSEA) {
+          const total = Number(rowSEA.carSlotsTotal) || 0;
+          const avail = Math.max(0, Number(rowSEA.carSlotsAvailable) || 0);
+          drawCapacityPie(capG, xSeattle, yC, R, total, avail, COLORS.rtl.strong);
+        }
+        if (rowBI) {
+          const total = Number(rowBI.carSlotsTotal) || 0;
+          const avail = Math.max(0, Number(rowBI.carSlotsAvailable) || 0);
+          drawCapacityPie(capG, xBain, yC, R, total, avail, COLORS.ltr.strong);
+        }
+      }
+
+
     }
   };
 
@@ -165,7 +201,6 @@ function assignSlots(rows) {
     window.ferry.render();
   };
 
-  // ---------- core drawing ----------
 // ---------- core drawing ----------
 function drawRow(g, r, y) {
   g.innerHTML = "";
@@ -337,12 +372,14 @@ function drawRow(g, r, y) {
       const svg = document.getElementById("clockFace");
       const overlay = svg ? svg.querySelector("#clock-overlay") : null;
       const dockTop = overlay ? ensure(overlay, "g", { id: "dock-top-arcs" }) : null;
+      const capacity = overlay ? ensure(overlay, "g", { id: "capacity-pies" }) : null;
       return {
         overlay: L.overlay,
         top: L.top,
         bottom: L.bottom,
         dockTop,
-        clear() { L.clear(); if (dockTop) dockTop.innerHTML = ""; }
+        capacity,
+        clear() { L.clear(); if (dockTop) dockTop.innerHTML = ""; if (capacity) capacity.innerHTML = ""; }
       };
     }
 
@@ -353,7 +390,9 @@ function drawRow(g, r, y) {
     const top = ensure(overlay, "g", { id: "row-top" });
     const bottom = ensure(overlay, "g", { id: "row-bot" });
     const dockTop = ensure(overlay, "g", { id: "dock-top-arcs" });
-    return { overlay, top, bottom, dockTop, clear() { top.innerHTML = ""; bottom.innerHTML = ""; dockTop.innerHTML = ""; } };
+    const capacity = ensure(overlay, "g", { id: "capacity-pies" });
+    return { overlay, top, bottom, dockTop, capacity, clear() { top.innerHTML = ""; bottom.innerHTML = ""; dockTop.innerHTML = ""; capacity.innerHTML = ""; } };
+
   }
 
   // ---------- static labels once ----------
@@ -461,4 +500,37 @@ function drawRow(g, r, y) {
     const a = (aDeg * Math.PI) / 180;
     return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
   }
+function polar(cx, cy, r, aDeg) {
+  const a = (aDeg * Math.PI) / 180;
+  return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+}
+
+// ---- capacity pie helpers ----
+function drawCapacityPie(g, cx, cy, r, total, avail, color) {
+  const frac = total > 0 ? Math.max(0, Math.min(1, avail / total)) : 0;
+  g.appendChild(elNS("circle", { cx, cy, r, fill: color, stroke: "none" }));
+  if (frac < 1) {
+    const usedFrac = 1 - frac;
+    g.appendChild(elNS("path", {
+      d: sectorPath(cx, cy, r, -90, -90 + usedFrac * 360),
+      fill: "#fff"
+    }));
+  }
+  const txt = elNS("text", {
+    x: cx, y: cy + 4, "text-anchor": "middle",
+    fill: "#111", "font-size": "12", "font-weight": "600"
+  });
+  txt.textContent = Number.isFinite(avail) ? String(avail) : "—";
+  g.appendChild(txt);
+}
+
+function sectorPath(cx, cy, r, a0Deg, a1Deg) {
+  const a0 = (Math.PI / 180) * a0Deg;
+  const a1 = (Math.PI / 180) * a1Deg;
+  const x0 = cx + r * Math.cos(a0), y0 = cy + r * Math.sin(a0);
+  const x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1);
+  const large = Math.abs(a1Deg - a0Deg) > 180 ? 1 : 0;
+  const sweep = 1;
+  return `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${large} ${sweep} ${x1} ${y1} Z`;
+}
 })();
