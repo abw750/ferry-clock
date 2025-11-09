@@ -47,17 +47,37 @@
   // stable vessel→slot map: 0 = top, 1 = bottom
   const _slotByVessel = Object.create(null);
 
-  function assignSlots(rows) {
-    rows.forEach(r => {
-      const v = (r && r.vessel && String(r.vessel).trim()) || null;
-      if (!v) return;
-      if (!(_slotByVessel[v] === 0 || _slotByVessel[v] === 1)) {
-        const used = new Set(Object.values(_slotByVessel));
-        _slotByVessel[v] = used.has(0) ? 1 : 0;
-      }
-    });
-    try { console.log("assignSlots map:", JSON.parse(JSON.stringify(_slotByVessel))); } catch {}
+  // --- persist slot map so vessels never trade bars ---
+function loadSlotMap() {
+  try { return JSON.parse(localStorage.getItem("ferrySlotMap") || "{}"); } catch { return {}; }
+}
+function saveSlotMap(map) {
+  try { localStorage.setItem("ferrySlotMap", JSON.stringify(map)); } catch {}
+}
+
+function assignSlots(rows) {
+  // start with any saved mapping
+  const saved = loadSlotMap();
+  for (const v in saved) {
+    if (saved[v] === 0 || saved[v] === 1) _slotByVessel[v] = saved[v];
   }
+
+  // assign new vessels to the first free slot, then persist
+  rows.forEach(r => {
+    const v = (r && r.vessel && String(r.vessel).trim()) || null;
+    if (!v) return;
+    if (!(_slotByVessel[v] === 0 || _slotByVessel[v] === 1)) {
+      const used = new Set(Object.values(_slotByVessel));
+      _slotByVessel[v] = used.has(0) ? 1 : 0;
+    }
+  });
+
+  // persist after any additions
+  saveSlotMap(_slotByVessel);
+
+  try { console.log("assignSlots map:", JSON.parse(JSON.stringify(_slotByVessel))); } catch {}
+}
+
 
   // --- public API ---
   window.ferry = {
@@ -275,15 +295,20 @@ function drawRow(g, r, y) {
 
     // draw one label depending on state
     if (!underway && sched) {
-      const t = elNS("text", {
-        x: originX, y: labelY,
-        "text-anchor": originAnchor,
+    // docked: place label 20px toward center from the origin end
+    const inward = 40;
+    const originXi = originX + (originX < 200 ? inward : -inward);
+
+    const t = elNS("text", {
+        x: originXi, y: labelY,
+        "text-anchor": originAnchor, // inward-aligned to the bar end
         fill: "#111",
         "font-size": "10"
-      });
-      t.textContent = sched;
-      g.appendChild(t);
+    });
+    t.textContent = sched;
+    g.appendChild(t);
     } else if (underway && eta) {
+ 
       const t = elNS("text", {
         x: destX, y: labelY,
         "text-anchor": destAnchor,
