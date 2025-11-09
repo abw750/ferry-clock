@@ -10,7 +10,8 @@
   };
 
   // 12 o'clock rim radii for dock arcs
-  const DOCK_OUTER_R = 171; // top slot
+  const DOCK_OUTER_R = 174
+  ; // top slot
   const DOCK_INNER_R = 165; // bottom slot
 
   function drawDockTopArc(container, slotIndex, pct, color) {
@@ -46,7 +47,7 @@
   let _rows = [];
   // stable vessel→slot map: 0 = top, 1 = bottom
   const _slotByVessel = Object.create(null);
-
+  
 // choose best row for a vessel (prefer inTransit, else earliest upcoming sched within 24h)
 function bestRowForVessel(rows, vessel) {
   const name = String(vessel || "").trim();
@@ -205,18 +206,39 @@ function assignSlots(rows) {
       if (capG) {
         capG.innerHTML = "";
 
-        // pick next boat to load from each origin (SEA=7, BI=3)
-        const nextFrom = (originId) => {
-          const cand = _rows
-            .filter(r => Number(r?.originTerminalId) === originId && String(r?.status || "").toLowerCase() !== "intransit")
-            .filter(r => r?.scheduledDepartureTime)
-            .map(r => ({ r, t: parseTodayLocal(r.scheduledDepartureTime)?.getTime() || Infinity }))
+       // robust origin resolver: prefer IDs, else direction text, else infer from destination
+        const ORIGIN = { SEA: 7, BI: 3 };
+        function originIdOf(r){
+        const id = Number(r?.originTerminalId);
+        if (id === 7 || id === 3) return id;
+        const dir = String(r?.direction || "").toLowerCase();
+        if (dir.includes("leave seattle") || dir.includes("seattle →") || dir.includes("seattle to")) return 7;
+        if (dir.includes("leave bainbridge") || dir.includes("bainbridge →") || dir.includes("bainbridge to")) return 3;
+        const dst = Number(r?.destinationTerminalId);
+        if (dst === 7) return 3;
+        if (dst === 3) return 7;
+        return null;
+        }
+        // next scheduled departure in the future from an origin
+        function nextFrom(originId){
+        const now = Date.now();
+        const items = _rows
+            .filter(r => originIdOf(r) === originId && r?.scheduledDepartureTime)
+            .map(r => ({ r, t: parseNextOccurrence(r.scheduledDepartureTime)?.getTime() || Infinity }))
+            .filter(x => x.t !== Infinity && x.t >= now - 60*1000)
             .sort((a,b) => a.t - b.t);
-          return cand.length ? cand[0].r : null;
-        };
+        return items.length ? items[0].r : null;
+        }
 
-        const rowSEA = nextFrom(7);
-        const rowBI  = nextFrom(3);
+        const rowSEA = nextFrom(ORIGIN.SEA);
+        const rowBI  = nextFrom(ORIGIN.BI);
+
+        // diag
+        try { console.log("capacity pies pick:", {
+        SEA: rowSEA ? { vessel: rowSEA.vessel, avail: rowSEA.carSlotsAvailable, total: rowSEA.carSlotsTotal } : null,
+        BI:  rowBI  ? { vessel: rowBI.vessel,  avail: rowBI.carSlotsAvailable,  total: rowBI.carSlotsTotal }  : null
+        }); } catch {}
+
 
         // geometry: centered on 3–9 axis, near labels
         const R = 15;               // raduis of small circles pies
