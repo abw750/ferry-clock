@@ -10,7 +10,7 @@
   };
 
   // 12 o'clock rim radii for dock arcs
-  const DOCK_OUTER_R = 174
+  const DOCK_OUTER_R = 173
   ; // top slot
   const DOCK_INNER_R = 165; // bottom slot
 
@@ -26,7 +26,7 @@
 
     container.appendChild(elNS("path", {
         d: `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`,
-        stroke: color, "stroke-width": 8, fill: "none", "stroke-linecap": "round"
+        stroke: color, "stroke-width": 7, fill: "none", "stroke-linecap": "butt"
     }));
     }
 
@@ -242,45 +242,57 @@ function assignSlots(rows) {
 
           if (rr && !underway) {
             const arrive = getActualArrivalLocal(rr);
-            let pct = computeDockProgress(arrive, rr.scheduledDepartureTime);
-            // start angle = minute hand at arrival minute when status flipped to docked
-            let start
+            const win = getDockWindow(arrive, rr.scheduledDepartureTime);
+            if (win) {
+              // Start angle = arrival minute on the rim
+              const startDeg = -90 + (win.tA.getMinutes() % 60) * 6;
+              // Sweep = elapsed minutes * 6° per minute; pass as a fraction of 60 minutes
+              const sweepDeg = Math.max(0, Math.min(win.elapsedMin, win.dwellMin)) * 6;
+              const pctOfCircle = sweepDeg / 360; // drawDockTopArc expects fraction of a full circle
+              drawDockTopArc(dockTop, slot, pctOfCircle, scheme.light, startDeg);
+            }
           }
         }
       }
       drawRow(top,    slotRows[0] || null, 95);
       drawRow(bottom, slotRows[1] || null, 305);
-      // ---- capacity pies (20% of face diameter => radius 40) ----
-      const capG = layers.capacity;
-      if (capG) {
-        capG.innerHTML = "";
+       // ---- capacity pies (always show two, BI on left, SEA on right) ----
+       const capG = layers.capacity;
+       if (capG) {
+         capG.innerHTML = "";
 
        // robust origin resolver: prefer IDs, else direction text, else infer from destination
-        const ORIGIN = { SEA: 7, BI: 3 };
-        function originIdOf(r){
-        const id = Number(r?.originTerminalId);
-        if (id === 7 || id === 3) return id;
-        const dir = String(r?.direction || "").toLowerCase();
-        if (dir.includes("leave seattle") || dir.includes("seattle →") || dir.includes("seattle to")) return 7;
-        if (dir.includes("leave bainbridge") || dir.includes("bainbridge →") || dir.includes("bainbridge to")) return 3;
-        const dst = Number(r?.destinationTerminalId);
-        if (dst === 7) return 3;
-        if (dst === 3) return 7;
-        return null;
-        }
-        // next scheduled departure in the future from an origin
-        function nextFrom(originId){
-        const now = Date.now();
-        const items = _rows
-            .filter(r => originIdOf(r) === originId && r?.scheduledDepartureTime)
-            .map(r => ({ r, t: parseNextOccurrence(r.scheduledDepartureTime)?.getTime() || Infinity }))
-            .filter(x => x.t !== Infinity && x.t >= now - 60*1000)
-            .sort((a,b) => a.t - b.t);
-        return items.length ? items[0].r : null;
-        }
+         const ORIGIN = { SEA: 7, BI: 3 };
+         function originIdOf(r){
+           const id = Number(r?.originTerminalId);
+           if (id === 7 || id === 3) return id;
+           const dir = String(r?.direction || "").toLowerCase();
+           if (dir.includes("leave seattle") || dir.includes("seattle →") || dir.includes("seattle to")) return 7;
+           if (dir.includes("leave bainbridge") || dir.includes("bainbridge →") || dir.includes("bainbridge to")) return 3;
+           const dst = Number(r?.destinationTerminalId);
+           if (dst === 7) return 3;
+           if (dst === 3) return 7;
+           return null;
+         }
+         // next scheduled departure in the future from an origin
+         function nextFrom(originId){
+           const now = Date.now();
+           const items = _rows
+               .filter(r => originIdOf(r) === originId && r?.scheduledDepartureTime)
+               .map(r => ({ r, t: parseNextOccurrence(r.scheduledDepartureTime)?.getTime() || Infinity }))
+               .filter(x => x.t !== Infinity && x.t >= now - 60*1000)
+               .sort((a,b) => a.t - b.t);
+           return items.length ? items[0].r : null;
+         }
 
-        const rowSEA = nextFrom(ORIGIN.SEA);
-        const rowBI  = nextFrom(ORIGIN.BI);
+         const rowSEA = nextFrom(ORIGIN.SEA);
+         const rowBI  = nextFrom(ORIGIN.BI);
+
+         // diag
+         try { console.log("capacity pies pick:", {
+           SEA: rowSEA ? { vessel: rowSEA.vessel, avail: rowSEA.carSlotsAvailable, total: rowSEA.carSlotsTotal } : null,
+           BI:  rowBI  ? { vessel: rowBI.vessel,  avail: rowBI.carSlotsAvailable,  total: rowBI.carSlotsTotal }  : null
+         }); } catch {}
 
         // diag
         try { console.log("capacity pies pick:", {
@@ -290,24 +302,23 @@ function assignSlots(rows) {
 
 
         // geometry: centered on 3–9 axis, near labels
-        const R = 15;               // raduis of small circles pies
+        const R = 15;               // raduis of small pies
         const yC = 200;
         const xSeattle = CX + INWARD - 28;     // just left of "SEATTLE"
         const xBain    = CX - INWARD + 28;     // just right of "BAINBRIDGE ISLAND"
 
-        if (rowSEA) {
-          const total = Number(rowSEA.carSlotsTotal) || 0;
-          const avail = Math.max(0, Number(rowSEA.carSlotsAvailable) || 0);
-          drawCapacityPie(capG, xSeattle, yC, R, total, avail, COLORS.rtl.strong);
+        // Always render both pies. If data missing, show placeholder ring with "—".
+        {
+          const totalSEA = rowSEA && Number.isFinite(Number(rowSEA.carSlotsTotal)) ? Number(rowSEA.carSlotsTotal) : 0;
+          const availSEA = rowSEA && Number.isFinite(Number(rowSEA.carSlotsAvailable)) ? Math.max(0, Number(rowSEA.carSlotsAvailable)) : 0;
+          drawCapacityPie(capG, xSeattle, yC, R, totalSEA, availSEA, COLORS.rtl.strong);
         }
-        if (rowBI) {
-          const total = Number(rowBI.carSlotsTotal) || 0;
-          const avail = Math.max(0, Number(rowBI.carSlotsAvailable) || 0);
-          drawCapacityPie(capG, xBain, yC, R, total, avail, COLORS.ltr.strong);
+        {
+          const totalBI = rowBI && Number.isFinite(Number(rowBI.carSlotsTotal)) ? Number(rowBI.carSlotsTotal) : 0;
+          const availBI = rowBI && Number.isFinite(Number(rowBI.carSlotsAvailable)) ? Math.max(0, Number(rowBI.carSlotsAvailable)) : 0;
+          drawCapacityPie(capG, xBain, yC, R, totalBI, availBI, COLORS.ltr.strong);
         }
       }
-
-
     }
   };
   // Back-compat shim
@@ -316,7 +327,19 @@ function assignSlots(rows) {
     window.ferry.render();
   };
 
-// ---------- core drawing ----------
+  // Smooth dock-arc animation: re-render without refetch every 5s.
+  // Guard against multiple timers on hot reload.
+  if (!window.__ferryRenderTimer) {
+    window.__ferryRenderTimer = setInterval(() => {
+      try {
+        if (window.ferry && typeof window.ferry.render === "function") {
+          window.ferry.render();
+        }
+      } catch {}
+    }, 5000);
+  }
+
+  // ---------- core drawing ----------
 function drawRow(g, r, y) {
   g.innerHTML = "";
   if (!r) return;
@@ -386,7 +409,7 @@ function drawRow(g, r, y) {
     null;
   const endStr = r.estimatedArrivalTime || null;
 
-  const pct = computeProgress(startStr, endStr);
+   const pct = computeTransitProgress(startStr, endStr);
 
   // choose x-position for dot
   let xp;
@@ -426,7 +449,7 @@ function drawRow(g, r, y) {
     const barY = (y < 200) ? (y + 50) : (y - 50);
     const isTop = y < 200;
     const labelGapTop = 8;   // vertical gap from bar for top row
-    const labelGapBot = 12;  // vertical gap from bar for bottom row
+    const labelGapBot = 15;  // vertical gap from bar for bottom row
     const labelY = isTop ? (barY - labelGapTop) : (barY + labelGapBot);
 
     // endpoint x positions
@@ -567,6 +590,18 @@ function drawRow(g, r, y) {
   function toNum(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
 
   // --- time + progress helpers ---
+    // Compute progress for an underway trip using today-only times.
+    // Rolls the END forward 24h if it is <= START (cross-midnight protection).
+    function computeTransitProgress(startStr, endStr) {
+    const t0 = parseTodayLocal(startStr);
+    const t1 = parseTodayLocal(endStr);
+    if (!t0 || !t1) return null;
+    let a = t0.getTime();
+    let b = t1.getTime();
+    if (b <= a) b += 24 * 60 * 60 * 1000; // allow ETA past midnight
+    return clamp01((Date.now() - a) / (b - a));
+    }
+
   function parseTodayLocal(hhmm) {
     if (!hhmm || typeof hhmm !== "string") return null;
     const now = new Date();
@@ -618,43 +653,33 @@ function computeDockProgress(actualArriveStr, schedDepartStr) {
   return clamp01((now - tA.getTime()) / (tD.getTime() - tA.getTime()));
 }
 
-  function computeProgress(actualDepartStr, etaStr) {
-    const t0 = parseTodayLocal(actualDepartStr);
-    const t1 = parseTodayLocal(etaStr);
-    if (!t0 || !t1) return null;
-    const now = Date.now();
-    const a = t0.getTime(), b = t1.getTime();
-    if (!(b > a)) return null;
-    return clamp01((now - a) / (b - a));
-  }
-
   // debug: mark renderer loaded
   console.log("[ferryClock] ready");
 
-  // --- dock progress + arc helpers ---
-  function computeDockProgress(actualArriveStr, schedDepartStr) {
-    const tD = parseTodayLocal(schedDepartStr);
+  // Dock window helper: returns arrival/depart times and minute counts
+  function getDockWindow(actualArriveStr, schedDepartStr) {
+    const tD = parseNextOccurrence(schedDepartStr);
     if (!tD) return null;
-
-    // if arrival missing, assume fixed dwell ending at scheduled departure
-    let tA = parseTodayLocal(actualArriveStr);
+    let tA = parseNextOccurrence(actualArriveStr);
     if (!tA) {
-      const fallbackMin = 20; // fallback dwell
-      tA = new Date(tD.getTime() - fallbackMin * 60 * 1000);
+      // fallback dwell of 20 min ending at scheduled depart
+      tA = new Date(tD.getTime() - 20 * 60 * 1000);
     }
-    if (!(tD > tA)) return null;
+    if (!(tD.getTime() > tA.getTime())) return null;
     const now = Date.now();
-    return clamp01((now - tA.getTime()) / (tD.getTime() - tA.getTime()));
+    const dwellMs   = tD.getTime() - tA.getTime();
+    const elapsedMs = Math.max(0, Math.min(dwellMs, now - tA.getTime()));
+    const dwellMin   = dwellMs   / 60000;
+    const elapsedMin = elapsedMs / 60000;
+    return { tA, tD, dwellMin, elapsedMin };
   }
+
+// --- dock progress + arc helpers ---
 
   function polar(cx, cy, r, aDeg) {
     const a = (aDeg * Math.PI) / 180;
     return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
   }
-function polar(cx, cy, r, aDeg) {
-  const a = (aDeg * Math.PI) / 180;
-  return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
-}
 
 // ---- capacity pie helpers ----
 function drawCapacityPie(g, cx, cy, r, total, avail, color) {
