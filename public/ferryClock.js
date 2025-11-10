@@ -3,11 +3,15 @@
   const CX = 200, CY = 200, RIM = 182, INWARD = Math.round(RIM * 0.56);
 
   // color palette
-  const COLORS = {
-    ltr:  { strong: "#059669", light: "#86efac" }, // BI -> SEA
-    rtl:  { strong: "#2563eb", light: "#93c5fd" }, // SEA -> BI
-    track:"#e5e7eb"
-  };
+    const COLORS = {
+    // BI → SEA visuals = racing green
+    ltr:  { strong: "#15a868ff", light: "#15a868ff" },
+    // SEA → BI visuals = maroon
+    rtl:  { strong: "#e11b1bff", light: "#e11b1bff" },
+    track: "#e5e7eb"
+    };
+    console.log("[ferryClock] palette", COLORS);
+
 
   // 12 o'clock rim radii for dock arcs
   const DOCK_OUTER_R = 173
@@ -29,6 +33,11 @@
         stroke: color, "stroke-width": 7, fill: "none", "stroke-linecap": "butt"
     }));
     }
+    // ship icon settings
+    const ICON_SRC  = "/icons/ferry.png";
+    const SHIP_W    = 18;   // px
+    const SHIP_H    = 18;   // px
+    const SHIP_GAP  = 4;    // vertical gap above the bar
 
 
   // strict actual-arrival accessor (no ETA fallback)
@@ -356,6 +365,13 @@ function drawRow(g, r, y) {
     if (from === 7 && to === 3) dir = "rtl";  // SEA -> BI
   }
 
+try {
+  console.log("drawRow", {
+    vessel: r?.vessel, dir, from: r?.originTerminalId, to: r?.destinationTerminalId,
+    status: r?.status, sched: r?.scheduledDepartureTime, actDep: r?.actualDepartureTime
+  });
+} catch {}
+
   // underway heuristic
   const underway =
     r.status === "inTransit" ||
@@ -429,6 +445,8 @@ function drawRow(g, r, y) {
 
     // moving dot must always be visible while underway
     g.appendChild(circleDot(xp, barY, 5.5, scheme.strong));
+    addShipIcon(g, xp, barY);
+
     } else {
 
       // docked: show dot at bar end closest to current dock (origin of next sailing)
@@ -436,8 +454,10 @@ function drawRow(g, r, y) {
         const origin = toNum(r.originTerminalId);
         const xp = origin === 7 ? xR : origin === 3 ? xL : (dir === "ltr" ? xL : xR);
 
-      g.appendChild(circleDot(xp, barY, 5.5, scheme.light));
-      // no colored fill while docked
+    g.appendChild(circleDot(xp, barY, 5.5, scheme.light));
+    addShipIcon(g, xp, barY);
+    // no colored fill while docked
+
     }
   }
   // ---- label hooks (docked vs underway) ----
@@ -481,16 +501,19 @@ function drawRow(g, r, y) {
     t.textContent = sched;
     g.appendChild(t);
     } else if (underway && eta) {
- 
-      const t = elNS("text", {
-        x: destX, y: labelY,
+    // For ETA: top row goes below the line; bottom row stays below as before
+    const etaY = isTop ? (barY + labelGapTop + 8) : (barY + labelGapBot);
+
+    const t = elNS("text", {
+        x: destX, y: etaY,
         "text-anchor": destAnchor,
         fill: "#111",
         "font-size": "10"
-      });
-      t.textContent = eta;
-      g.appendChild(t);
+    });
+    t.textContent = eta;
+    g.appendChild(t);
     }
+
   }
 
   // ferry name
@@ -578,7 +601,21 @@ function drawRow(g, r, y) {
   }
   function circleDot(x, y, r, stroke) {
     return elNS("circle", { cx: x, cy: y, r: r, fill: stroke });
+
   }
+  function addShipIcon(g, cx, barY) {
+    const x = cx - SHIP_W / 2;
+    const y = barY - SHIP_H - SHIP_GAP;
+    const img = elNS("image", {
+      href: ICON_SRC,
+      x, y,
+      width: SHIP_W, height: SHIP_H,
+      preserveAspectRatio: "xMidYMid meet"
+    });
+    g.appendChild(img);
+  }
+
+
   function ensure(parent, tag, attrs) {
     const id = attrs && attrs.id;
     let node = id ? parent.querySelector(`#${id}`) : null;
@@ -680,52 +717,88 @@ function computeDockProgress(actualArriveStr, schedDepartStr) {
     const a = (aDeg * Math.PI) / 180;
     return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
   }
-
 // ---- capacity pie helpers ----
+// visual tuning knob: donut ring thickness in px
+const RING_W = 6;
+
 function drawCapacityPie(g, cx, cy, r, total, avail, color) {
   // normalize
   const T = Number.isFinite(total) ? Math.max(0, total) : 0;
   const A = Number.isFinite(avail) ? Math.max(0, avail) : 0;
 
-  // guard: no total → show empty ring with "—"
+  // placeholder when total unknown
   if (T <= 0) {
-    g.appendChild(elNS("circle", { cx, cy, r, fill: "#fff", stroke: "#ddd", "stroke-width": 2 }));
+    // faint track ring
+    g.appendChild(elNS("circle", {
+      cx, cy, r,
+      fill: "none",
+      stroke: "#ddd",
+      "stroke-width": RING_W,
+      "stroke-linecap": "butt"
+    }));
+    // white center to force donut look on non-white backgrounds
+    g.appendChild(elNS("circle", {
+      cx, cy, r: Math.max(1, r - RING_W * 0.5 - 1),
+      fill: "#fff", stroke: "none"
+    }));
+    // label
     const txt = elNS("text", { x: cx, y: cy + 4, "text-anchor": "middle", fill: "#888", "font-size": "12", "font-weight": "600" });
     txt.textContent = "—";
     g.appendChild(txt);
     return;
   }
 
-  // base
-  g.appendChild(elNS("circle", { cx, cy, r, fill: color, stroke: "none" }));
+  // always draw track ring
+  g.appendChild(elNS("circle", {
+    cx, cy, r,
+    fill: "none",
+    stroke: (COLORS && COLORS.track) ? COLORS.track : "#e5e7eb",
+    "stroke-width": RING_W,
+    "stroke-linecap": "butt"
+  }));
 
-  // fully empty → draw a solid white circle instead of a 360° arc
-  if (A === 0) {
-    g.appendChild(elNS("circle", { cx, cy, r, fill: "#fff", stroke: "none" }));
-  } else if (A < T) {
-    // partial used sector: white wedge for used capacity
-    const usedFrac = 1 - Math.max(0, Math.min(1, A / T));
-    g.appendChild(elNS("path", {
-      d: sectorPath(cx, cy, r, -90, -90 + usedFrac * 360),
-      fill: "#fff"
-    }));
+  // availability as an arc along the ring, starting at 12 o'clock
+  const frac = Math.max(0, Math.min(1, A / T));
+  if (frac > 0) {
+    const path = elNS("path", {
+      d: arcPath(cx, cy, r, -90, frac * 360),
+      fill: "none",
+      stroke: color,
+      "stroke-width": RING_W,
+      "stroke-linecap": "butt"
+    });
+    g.appendChild(path);
   }
-  // label
+
+  // white center so it reads as a donut regardless of page background
+  g.appendChild(elNS("circle", {
+    cx, cy, r: Math.max(1, r - RING_W * 0.5 - 1),
+    fill: "#fff",
+    stroke: "none"
+  }));
+
+  // numeric label = available count
   const txt = elNS("text", {
-    x: cx, y: cy + 4, "text-anchor": "middle",
-    fill: "#111", "font-size": "12", "font-weight": "600"
+    x: cx, y: cy + 4,
+    "text-anchor": "middle",
+    fill: "#111",
+    "font-size": "12",
+    "font-weight": "600"
   });
   txt.textContent = String(A);
   g.appendChild(txt);
 }
 
-function sectorPath(cx, cy, r, a0Deg, a1Deg) {
-  const a0 = (Math.PI / 180) * a0Deg;
-  const a1 = (Math.PI / 180) * a1Deg;
+// SVG arc path centered at (cx,cy) with radius r,
+// starting at startDeg and sweeping sweepDeg clockwise.
+function arcPath(cx, cy, r, startDeg, sweepDeg) {
+  const a0 = (Math.PI / 180) * startDeg;
+  const a1 = (Math.PI / 180) * (startDeg + sweepDeg);
   const x0 = cx + r * Math.cos(a0), y0 = cy + r * Math.sin(a0);
   const x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1);
-  const large = Math.abs(a1Deg - a0Deg) > 180 ? 1 : 0;
-  const sweep = 1;
-  return `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${large} ${sweep} ${x1} ${y1} Z`;
+  const large = Math.abs(sweepDeg) > 180 ? 1 : 0;
+  const sweep = sweepDeg >= 0 ? 1 : 0;
+  return `M ${x0} ${y0} A ${r} ${r} 0 ${large} ${sweep} ${x1} ${y1}`;
 }
+
 })();

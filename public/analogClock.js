@@ -7,8 +7,8 @@
 
     // --- clock hands (hour + minute), drawn above overlay ---
   const hands = ensure(svg, "g", { id: "clock-hands", stroke: "#222", "stroke-linecap": "round" });
-  const hourHand   = ensure(hands, "line", { id: "hand-hour",   x1: 200, y1: 200, x2: 200, y2: 105, stroke: "#ff0000ff", "stroke-width": 6 });
-  const minuteHand = ensure(hands, "line", { id: "hand-minute", x1: 200, y1: 200, x2: 200, y2: 65, stroke: "#ff0000ff", "stroke-width": 3 });
+  const hourHand   = ensure(hands, "line", { id: "hand-hour",   x1: 200, y1: 200, x2: 200, y2: 105, stroke: "rgba(37, 105, 233, 1)", "stroke-width": 6 });
+  const minuteHand = ensure(hands, "line", { id: "hand-minute", x1: 200, y1: 200, x2: 200, y2: 65, stroke: "rgba(37, 105, 233, 1)", "stroke-width": 3 });
   const secondHand = ensure(hands, "line", { id: "hand-second", x1: 200, y1: 200, x2: 200, y2: 25, stroke: "rgba(37, 105, 233, 1)", "stroke-width": 2 });
   const pin        = ensure(hands, "circle", { cx: 200, cy: 200, r: 4, fill: "#ff0000ff" });
 
