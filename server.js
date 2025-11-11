@@ -64,7 +64,11 @@ function parseWsdotDate(d) {
 }
 function hhmm(t) {
   if (!t) return null;
-  return t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return t.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "America/Los_Angeles"
+  });
 }
 
 async function getJson(u) {
