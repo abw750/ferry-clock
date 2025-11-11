@@ -1,3 +1,5 @@
+// server.js
+
 import express from "express";
 import morgan from "morgan";
 import dotenv from "dotenv";
@@ -7,7 +9,31 @@ dotenv.config();
 
 const app = express();
 app.use(morgan("dev"));
-app.use(express.static("public"));
+
+// serve static files (HTML, JS, CSS, images)
+app.use(express.static("public", {
+  etag: true,
+  lastModified: true,
+  setHeaders(res, path) {
+    if (path.endsWith(".html")) {
+      res.setHeader("Cache-Control", "no-store");
+    } else if (/\.(?:js|css|png|svg|webmanifest|json|ico)$/i.test(path)) {
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+      res.setHeader("Cache-Control", "public, max-age=3600");
+    }
+  }
+}));
+
+// add this block ONCE, directly below the one above
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) {
+    res.removeHeader("Cache-Control");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  }
+  next();
+});
+
 
 const {
   WSDOT_API_KEY: KEY,
@@ -182,10 +208,18 @@ async function pollOnce() {
     const etaByVessel = {};
     const arrivedByVessel = {};
     (Array.isArray(locs) ? locs : []).forEach(v => {
-      const name = v.VesselName;
-      const eta  = parseWsdotDate(v.Eta);
-      const arr  = parseWsdotDate(v.Arrived);
-      if (name) {
+    const name = v.VesselName;
+    // WSDOT uses several keys across endpoints; accept all known variants
+    const eta  = parseWsdotDate(v.Eta ?? v.ETA ?? v.EstimatedArrival);
+    const arr  = parseWsdotDate(
+        v.Arrived ??
+        v.Arrival ??
+        v.ActualArrival ??
+        v.ArrivedUTC ??
+        v.ActualArrivalTime ??
+        null
+    );
+    if (name) {
         if (eta) etaByVessel[name] = eta;
         if (arr) arrivedByVessel[name] = arr;
       }
@@ -210,9 +244,6 @@ async function pollOnce() {
     if (vesselName) liveByVessel[vesselName] = { depId, arrId, leftDock, eta };
     });
 
-
-
-
     function shape(row, driveUpAvail, destTid) {
 
     if (!row) return null;
@@ -232,11 +263,20 @@ async function pollOnce() {
     let eta_local = live?.eta ? hhmm(live.eta) : null; // only when live matches this route
         if (live?.leftDock && live?.eta && live.eta < live.leftDock) eta_local = null; // guard: ETA cannot precede depart
     const arr_local                   = hhmm(arrivedByVessel[vessel]);            // last actual arrival if present
-    const status = live?.leftDock ? "inTransit" : "scheduled";
 
-    // Final displayed departure time: prefer live depart when present
-    const departure_local = liveDepart_local || scheduledDepartureTime_local;
+    // Use liveByVessel map built in pollOnce()
+    const liveV = vessel ? liveByVessel[vessel] : null;
+    const liveDepart_byVessel = liveV?.leftDock ? hhmm(liveV.leftDock) : null;
 
+
+    // underway if either route- or vessel-based live depart exists
+    const status = (liveV?.leftDock || live?.leftDock) ? "inTransit" : "scheduled";
+
+    // final displayed departure: vessel live > route live > schedule
+    const departure_local = liveDepart_byVessel || liveDepart_local || scheduledDepartureTime_local;
+
+    // fill ETA from by-vessel if route match missed it
+    if (!eta_local && liveV?.eta) eta_local = hhmm(liveV.eta);
 
     // Car space
     const carSlotsTotal     = capacity;
@@ -247,7 +287,6 @@ async function pollOnce() {
     let destId   = Number(destTid);
 
     // Use liveByVessel map built in pollOnce()
-    const liveV = vessel ? liveByVessel[vessel] : null;
     if (liveV && liveV.leftDock) {
     if (typeof liveV.depId === "number" && typeof liveV.arrId === "number" && liveV.depId && liveV.arrId) {
         originId = liveV.depId;
@@ -269,8 +308,6 @@ async function pollOnce() {
     ? `${fromName} → ${toName}`
     : (row.direction || row.Direction || row.SailingDir || "");
 
-
-
     return {
         vessel,
         direction,
@@ -278,15 +315,14 @@ async function pollOnce() {
         // Keep existing keys your UI already reads
         departureTime: departure_local,               // live when available, else schedule
         estimatedArrivalTime: eta_local,
-        actualArrivalTime: arr_local,
+        actualArrivalTime: (status === "inTransit") ? null : arr_local,
         carSlotsTotal,
         carSlotsAvailable,
 
         // Add explicit fields for clarity if you want the UI to switch logic later
 
         scheduledDepartureTime: scheduledDepartureTime_local,
-        actualDepartureTime: liveDepart_local || null,
-
+        actualDepartureTime: liveDepart_local,
         status,
         originTerminalId: row.termId,
         destinationTerminalId: Number(destTid),
@@ -296,13 +332,30 @@ async function pollOnce() {
     };
     }
 
-
-    const summary = [
-      // Seattle -> Bainbridge
-      nextSEA ? shape(nextSEA, seaAvail, BI_ID) : null,
-      // Bainbridge -> Seattle
-      nextBI  ? shape(nextBI,  biAvail,  SEA_ID) : null
+    let summary = [
+    // Seattle -> Bainbridge
+    nextSEA ? shape(nextSEA, seaAvail, BI_ID) : null,
+    // Bainbridge -> Seattle
+    nextBI  ? shape(nextBI,  biAvail,  SEA_ID) : null
     ].filter(Boolean);
+
+    // If both rows show the same vessel name, prefer live route-matched names
+    if (summary.length === 2 &&
+        summary[0].vessel && summary[1].vessel &&
+        summary[0].vessel === summary[1].vessel) {
+    const liveA = liveByRoute[`${SEA_ID}-${BI_ID}`]?.vesselName || null;
+    const liveB = liveByRoute[`${BI_ID}-${SEA_ID}`]?.vesselName || null;
+    if (liveA) summary[0].vessel = liveA;
+    if (liveB) summary[1].vessel = liveB;
+    }
+
+    const liveNames = Object.keys(liveByVessel || {});
+    console.log("[poll] picks", {
+        nextSEA: nextSEA?.vessel || null,
+        nextBI: nextBI?.vessel || null,
+        live: liveNames
+    });
+
 
     cache = {
         summary,
@@ -375,11 +428,18 @@ app.get("/api/peekStats", async (req, res) => {
   }
 });
 
-app.get("/api/status",  (req, res) => res.json({
-  lastFetchedAt: cache.lastFetchedAt,
-  lastError: cache.lastError,
-  items: cache.summary.length
-}));
+app.get("/api/status", (req, res) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.json({
+    lastFetchedAt: cache.lastFetchedAt,
+    lastError: cache.lastError,
+    items: cache.summary.length
+  });
+});
+
 app.get("/api/flat", (req, res) => res.json(cache.summary));
 
-app.listen(8000, () => console.log("Server http://localhost:8000"));
+const PORT = process.env.PORT || 8000;
+app.listen(PORT, () => console.log(`Server listening on ${PORT}`));

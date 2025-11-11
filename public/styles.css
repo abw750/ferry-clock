@@ -12,3 +12,33 @@ button:hover { background: #eee; }
 table tr:nth-child(even) { background: #f9f9f9; }
 table th { background: #f0f0f0; }
 table td, table th { border: 1px solid #ddd; padding: 6px 8px; }
+
+/* Ferry Clock static styling */
+#clock-overlay { font-family: system-ui, Arial, sans-serif; }
+
+/* Minute tick face */
+#minute-face { stroke: #333; stroke-linecap: round; }
+#minute-face line { stroke-width: 1.5; }
+#minute-face line:nth-of-type(5n+1) { stroke-width: 3; }
+#minute-face circle { fill: none; stroke: #2b2b2b; stroke-width: 1; }
+
+/* Transit bars and dots */
+.fc-track { stroke: #e5e7eb; stroke-width: 6; stroke-linecap: round; }
+.fc-fill  { stroke-width: 6; stroke-linecap: round; fill: none; }
+
+/* Capacity pies */
+.fc-pie-track { stroke: #e5e7eb; stroke-linecap: butt; }
+.fc-pie-arc   { stroke-linecap: butt; }
+.fc-pie-center { fill: #fff; }
+.fc-label-small { font-size: 10px; fill: #111; }
+.fc-label-med   { font-size: 12px; fill: #111; font-weight: 600; }
+.fc-name        { font-size: 12px; fill: #222; text-anchor: middle; }
+
+/* Analog clock hands */
+#hand-hour, #hand-minute, #hand-second { stroke-linecap: round; }
+#hand-hour   { stroke: rgba(37, 105, 233, 1); stroke-width: 6; }
+#hand-minute { stroke: rgba(37, 105, 233, 1); stroke-width: 3; }
+#hand-second { stroke: rgb(7, 55, 143); stroke-width: 2; }
+#clock-hands circle { fill: #ff0000ff; }
+
+

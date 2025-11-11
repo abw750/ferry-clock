@@ -254,7 +254,7 @@ function renderSummaryTable(rows) {
       nz(r?.scheduledDepartureTime),   // explicitly scheduled
       nz(r?.actualDepartureTime),      // new column
       nz(r?.estimatedArrivalTime),
-      nz(getActualArrival(r)), 
+      nz(r?.actualArrivalTime), 
       nzi(r?.carSlotsTotal),
       nzi(r?.carSlotsAvailable),
       nz(r?.status === "inTransit" ? "Underway" : "At dock"),

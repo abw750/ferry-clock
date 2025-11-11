@@ -1,24 +1,31 @@
 // public/ferryClock.js — ferry-only rendering, no dependency on analogClock
 (function () {
-  const CX = 200, CY = 200, RIM = 182, INWARD = Math.round(RIM * 0.56);
+    // clock geometry
+    const CX = 200;
+    const CY = 200;
+    const RIM_OUTER = 182;                 // outer dial radius
+    const RIM_INNER = Math.round(RIM_OUTER * 0.56); // inward offset for labels/pies
 
-  // color palette
+    // color palette (all ferry visuals)
+    const COLOR_STRONG_LTR = "#15a868ff"; // BI → SEA
+    const COLOR_STRONG_RTL = "#e11b1bff"; // SEA → BI
+    const COLOR_TRACK       = "#e5e7eb";
+
     const COLORS = {
-    // BI → SEA visuals = racing green
-    ltr:  { strong: "#15a868ff", light: "#15a868ff" },
-    // SEA → BI visuals = maroon
-    rtl:  { strong: "#e11b1bff", light: "#e11b1bff" },
-    track: "#e5e7eb"
+    ltr:  { strong: COLOR_STRONG_LTR, light: COLOR_STRONG_LTR },
+    rtl:  { strong: COLOR_STRONG_RTL, light: COLOR_STRONG_RTL },
+    track: COLOR_TRACK
     };
-    console.log("[ferryClock] palette", COLORS);
 
+        // WSDOT terminal IDs
+    const TERM_BI  = 3; // Bainbridge Island
+    const TERM_SEA = 7; // Seattle
 
-  // 12 o'clock rim radii for dock arcs
-  const DOCK_OUTER_R = 173
-  ; // top slot
-  const DOCK_INNER_R = 165; // bottom slot
+    // 12 o'clock rim radii for dock arcs
+    const DOCK_OUTER_R = RIM_OUTER - 9;  // 182 - 9 = 173
+    const DOCK_INNER_R = RIM_OUTER - 17; // 182 - 17 = 165
 
-    function drawDockTopArc(container, slotIndex, pct, color, startDeg) {
+  function drawDockTopArc(container, slotIndex, pct, color, startDeg) {
     const r = slotIndex === 0 ? DOCK_OUTER_R : DOCK_INNER_R;
     if (pct == null) return;
 
@@ -30,15 +37,29 @@
 
     container.appendChild(elNS("path", {
         d: `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`,
-        stroke: color, "stroke-width": 7, fill: "none", "stroke-linecap": "butt"
+        stroke: color, "stroke-width": 7, fill: "none", "stroke-linecap": STROKE_CAP
     }));
-    }
+  }
     // ship icon settings
     const ICON_SRC  = "/icons/ferry.png";
-    const SHIP_W    = 18;   // px
-    const SHIP_H    = 18;   // px
-    const SHIP_GAP  = 4;    // vertical gap above the bar
-
+    const SHIP_W    = 18;    // px
+    const SHIP_H    = 18;    // px
+    const SHIP_GAP  = 4;     // vertical gap above the bar
+    const LABEL_GAP = 15;    // px
+    const BAR_W   = 150;     // px, transit bar width
+    const BAR_Y_OFFSET = 50; // px, vertical offset from arrow row to transit bar
+    const STROKE_CAP = "butt";  // consistent stroke linecap across arcs and pies
+    // time units
+    const MIN_MS = 60 * 1000;
+    const HOUR_MS = 60 * MIN_MS;
+    const DAY_MS = 24 * HOUR_MS;
+    // defaults
+    const DEFAULT_DWELL_MIN = 20;   // fallback dock dwell
+    const DOCK_CACHE_GRACE_MIN = 5; // keep dock snapshot after sched depart
+    
+    // capacity pie geometry
+    const CAP_PIE_R = 15;           // radius in px
+    const CAP_PIE_X_OFFSET = 28;    // horizontal offset from RIM_INNER
 
   // strict actual-arrival accessor (no ETA fallback)
   function getActualArrivalLocal(r) {
@@ -53,23 +74,24 @@
     );
   }
 
-  // --- state ---
+  function isUnderway(r) {
+  if (!r) return false;
+  const s = String(r.status || "").toLowerCase();
+  return s === "intransit" ||
+         !!r.actualDepartureTime ||
+         (!!r.estimatedArrivalTime && r.estimatedArrivalTime !== "—");
+}
 
+  // --- state ---
   // sticky dock cache so arcs persist even if the API drops a row briefly
 const _dockCache = loadDockCache();
 function loadDockCache(){ try { return JSON.parse(localStorage.getItem("ferryDockCache")||"{}"); } catch { return {}; } }
 function saveDockCache(){ try { localStorage.setItem("ferryDockCache", JSON.stringify(_dockCache)); } catch {} }
 
-// underway test used by cache logic
-function isUnderwayRow(r){
-  const s = String(r?.status || "").toLowerCase();
-  return s === "intransit" || !!r?.actualDepartureTime || (!!r?.estimatedArrivalTime && r.estimatedArrivalTime !== "—");
-}
-
 // record last docked state; expires shortly after scheduled departure
 function upsertDockSnapshot(r){
   const v = String(r?.vessel || "").trim(); if (!v) return;
-  if (isUnderwayRow(r)) return;
+  if (isUnderway(r)) return;
   const depart = parseNextOccurrence(r?.scheduledDepartureTime); if (!depart) return;
   const arrive = getActualArrivalLocal(r) || null;
   _dockCache[v] = {
@@ -80,7 +102,7 @@ function upsertDockSnapshot(r){
     destinationTerminalId: r?.destinationTerminalId ?? null,
     direction: r?.direction || null,
     status: "Docked",
-    _expiresAt: depart.getTime() + 5 * 60 * 1000 // keep 5 min past sched depart
+    _expiresAt: depart.getTime() + DOCK_CACHE_GRACE_MIN * MIN_MS // keep past sched depart
   };
   saveDockCache();
 }
@@ -140,6 +162,7 @@ function earliestUpcoming(rows, excludeVessel = null) {
 function loadSlotMap() {
   try { return JSON.parse(localStorage.getItem("ferrySlotMap") || "{}"); } catch { return {}; }
 }
+
 function saveSlotMap(map) {
   try { localStorage.setItem("ferrySlotMap", JSON.stringify(map)); } catch {}
 }
@@ -163,10 +186,7 @@ function assignSlots(rows) {
 
   // persist after any additions
   saveSlotMap(_slotByVessel);
-
-  try { console.log("assignSlots map:", JSON.parse(JSON.stringify(_slotByVessel))); } catch {}
 }
-
 
   // --- public API ---
     window.ferry = {
@@ -176,36 +196,13 @@ function assignSlots(rows) {
 
         // update dock cache from current rows
         for (const r of _rows) upsertDockSnapshot(r);
-
-        try {
-        const names = _rows.slice(0, 2).map(r => r && r.vessel || null);
-        console.log("ferry.setData:", _rows.length, names, "slots:", JSON.stringify(_slotByVessel));
-        } catch {}
     },
 
-
-    render() {
-      const dbg = _rows.slice(0, 2).map(r => r && ({
-        vessel: r.vessel || null,
-        from: r.originTerminalId ?? null,
-        to: r.destinationTerminalId ?? null,
-        status: r.status || null,
-        depart: r.actualDepartureTime || r.scheduledDepartureTime || null,
-        eta: r.estimatedArrivalTime || null
-      }));
-      console.table(dbg);
-
+    render() {      
       const layers = getLayers();
       if (!layers) { console.warn("ferry.render: no layers"); return; }
       const { top, bottom, dockTop, clear } = layers;
-
-      if (typeof clear === "function") {
         clear();
-      } else {
-        top.innerHTML = "";
-        bottom.innerHTML = "";
-        if (dockTop) dockTop.innerHTML = "";
-      }
 
       ensureLabels();
 
@@ -220,7 +217,6 @@ function assignSlots(rows) {
     if (!slotRows[0] && vs[0]) slotRows[0] = getDockSnapshot(vs[0]);
     if (!slotRows[1] && vs[1]) slotRows[1] = getDockSnapshot(vs[1]);
 
-
     // backfill any missing slot with earliest upcoming, avoiding duplicate vessel
     if (!slotRows[0]) slotRows[0] = earliestUpcoming(_rows, slotRows[1]?.vessel || null);
     if (!slotRows[1]) slotRows[1] = earliestUpcoming(_rows, slotRows[0]?.vessel || null);
@@ -228,7 +224,6 @@ function assignSlots(rows) {
     // final safety
     if (!slotRows[0] && _rows[0]) slotRows[0] = _rows[0];
     if (!slotRows[1] && _rows[1]) slotRows[1] = _rows[1];
-
 
       // 12 o'clock dock arcs: only when docked. No track when underway.
       if (dockTop) {
@@ -241,13 +236,13 @@ function assignSlots(rows) {
             if (s.includes("bainbridge") && s.includes("seattle")) {
               dir = s.indexOf("bainbridge") < s.indexOf("seattle") ? "ltr" : "rtl";
             } else {
-              const from = Number(rr.originTerminalId), to = Number(rr.destinationTerminalId);
-              if (from === 3 && to === 7) dir = "ltr";
-              if (from === 7 && to === 3) dir = "rtl";
+                const from = Number(rr.originTerminalId), to = Number(rr.destinationTerminalId);
+                if (from === TERM_BI && to === TERM_SEA) dir = "ltr";
+                if (from === TERM_SEA && to === TERM_BI) dir = "rtl";
             }
           }
           const scheme = dir === "ltr" ? COLORS.ltr : COLORS.rtl;
-          const underway = !!(rr && (rr.status === "inTransit" || rr.actualDepartureTime || (rr.estimatedArrivalTime && rr.estimatedArrivalTime !== "—")));
+          const underway = isUnderway(rr);
 
           if (rr && !underway) {
             const arrive = getActualArrivalLocal(rr);
@@ -271,16 +266,16 @@ function assignSlots(rows) {
          capG.innerHTML = "";
 
        // robust origin resolver: prefer IDs, else direction text, else infer from destination
-         const ORIGIN = { SEA: 7, BI: 3 };
+         const ORIGIN = { SEA: TERM_SEA, BI: TERM_BI };
          function originIdOf(r){
            const id = Number(r?.originTerminalId);
-           if (id === 7 || id === 3) return id;
+           if (id === TERM_SEA || id === TERM_BI) return id;
            const dir = String(r?.direction || "").toLowerCase();
-           if (dir.includes("leave seattle") || dir.includes("seattle →") || dir.includes("seattle to")) return 7;
-           if (dir.includes("leave bainbridge") || dir.includes("bainbridge →") || dir.includes("bainbridge to")) return 3;
+           if (dir.includes("leave seattle") || dir.includes("seattle →") || dir.includes("seattle to")) return TERM_SEA;
+           if (dir.includes("leave bainbridge") || dir.includes("bainbridge →") || dir.includes("bainbridge to")) return TERM_BI;
            const dst = Number(r?.destinationTerminalId);
-           if (dst === 7) return 3;
-           if (dst === 3) return 7;
+           if (dst === TERM_SEA) return TERM_BI;
+           if (dst === TERM_BI) return TERM_SEA;
            return null;
          }
          // next scheduled departure in the future from an origin
@@ -294,27 +289,14 @@ function assignSlots(rows) {
            return items.length ? items[0].r : null;
          }
 
-         const rowSEA = nextFrom(ORIGIN.SEA);
-         const rowBI  = nextFrom(ORIGIN.BI);
-
-         // diag
-         try { console.log("capacity pies pick:", {
-           SEA: rowSEA ? { vessel: rowSEA.vessel, avail: rowSEA.carSlotsAvailable, total: rowSEA.carSlotsTotal } : null,
-           BI:  rowBI  ? { vessel: rowBI.vessel,  avail: rowBI.carSlotsAvailable,  total: rowBI.carSlotsTotal }  : null
-         }); } catch {}
-
-        // diag
-        try { console.log("capacity pies pick:", {
-        SEA: rowSEA ? { vessel: rowSEA.vessel, avail: rowSEA.carSlotsAvailable, total: rowSEA.carSlotsTotal } : null,
-        BI:  rowBI  ? { vessel: rowBI.vessel,  avail: rowBI.carSlotsAvailable,  total: rowBI.carSlotsTotal }  : null
-        }); } catch {}
-
+         const rowSEA = nextFrom(TERM_SEA);
+         const rowBI  = nextFrom(TERM_BI);
 
         // geometry: centered on 3–9 axis, near labels
-        const R = 15;               // raduis of small pies
-        const yC = 200;
-        const xSeattle = CX + INWARD - 28;     // just left of "SEATTLE"
-        const xBain    = CX - INWARD + 28;     // just right of "BAINBRIDGE ISLAND"
+        const R = CAP_PIE_R;        // radius of small pies
+        const yC = CY;
+        const xSeattle = CX + RIM_INNER - CAP_PIE_X_OFFSET;  // just left of "SEATTLE"
+        const xBain    = CX - RIM_INNER + CAP_PIE_X_OFFSET;  // just right of "BAINBRIDGE ISLAND"
 
         // Always render both pies. If data missing, show placeholder ring with "—".
         {
@@ -350,42 +332,38 @@ function assignSlots(rows) {
 
   // ---------- core drawing ----------
 function drawRow(g, r, y) {
-  g.innerHTML = "";
-  if (!r) return;
+    g.innerHTML = "";
+    if (!r) return;
 
-  // infer direction: prefer text, then IDs
-  let dir = null; // "ltr" | "rtl"
-  const s = String(r.direction || "").toLowerCase();
-  if (s.includes("bainbridge") && s.includes("seattle")) {
-    dir = s.indexOf("bainbridge") < s.indexOf("seattle") ? "ltr" : "rtl";
-  } else {
-    const from = toNum(r.originTerminalId);
-    const to   = toNum(r.destinationTerminalId);
-    if (from === 3 && to === 7) dir = "ltr";  // BI -> SEA
-    if (from === 7 && to === 3) dir = "rtl";  // SEA -> BI
-  }
+    // infer direction: prefer text, then IDs
+    let dir = null; // "ltr" | "rtl"
+    const s = String(r.direction || "").toLowerCase();
+    if (s.includes("bainbridge") && s.includes("seattle")) {
+        dir = s.indexOf("bainbridge") < s.indexOf("seattle") ? "ltr" : "rtl";
+    } else {
+        const from = toNum(r.originTerminalId);
+        const to   = toNum(r.destinationTerminalId);
+        if (from === TERM_BI && to === TERM_SEA) dir = "ltr";  // BI -> SEA
+        if (from === TERM_SEA && to === TERM_BI) dir = "rtl";  // SEA -> BI
+    }
 
-try {
-  console.log("drawRow", {
-    vessel: r?.vessel, dir, from: r?.originTerminalId, to: r?.destinationTerminalId,
-    status: r?.status, sched: r?.scheduledDepartureTime, actDep: r?.actualDepartureTime
-  });
-} catch {}
+    // underway heuristic
+    const underway = isUnderway(r);
+    // shared bar geometry for transit and labels
+    const barWidth = BAR_W;
+    const xL = CX - barWidth / 2;
+    const xR = CX + barWidth / 2;
+    const barY = (y < CY) ? (y + BAR_Y_OFFSET) : (y - BAR_Y_OFFSET);
+    const isTop = y < CY;
 
-  // underway heuristic
-  const underway =
-    r.status === "inTransit" ||
-    !!r.actualDepartureTime ||
-    (!!r.estimatedArrivalTime && r.estimatedArrivalTime !== "—");
+    // colors
+    const scheme = (dir === "ltr") ? COLORS.ltr : COLORS.rtl;
+    const stroke = (dir ? (underway ? scheme.strong : scheme.light) : "#999");
 
-  // colors
-  const scheme = (dir === "ltr") ? COLORS.ltr : COLORS.rtl;
-  const stroke = (dir ? (underway ? scheme.strong : scheme.light) : "#999");
-
-  // center arrow indicator on 12–6 axis
-  if (dir) {
+    // center arrow indicator on 12–6 axis
+    if (dir) {
     const y0 = y, halfLen = 28, head = 8;
-    const xL = 200 - halfLen, xR = 200 + halfLen;
+    const xL = CX - halfLen, xR = CX + halfLen;
     const arrowColor = underway ? scheme.strong : scheme.light;
 
     g.appendChild(line(xL, y0, xR, y0, arrowColor, 3));
@@ -397,90 +375,70 @@ try {
       if (!underway) g.appendChild(circleDot(xR, y0, 2, arrowColor));
     }
   } else {
-    const t = elNS("text", { x: 200, y, "text-anchor": "middle", fill: stroke, "font-size": "14" });
+    const t = elNS("text", { x: CX, y, "text-anchor": "middle", fill: stroke, "font-size": "14" });
     t.textContent = "--";
     g.appendChild(t);
   }
 
   // transit bar + moving dot
   if (dir) {
-    const barWidth = 150;
-    const xL = 200 - barWidth / 2;
-    const xR = 200 + barWidth / 2;
-    const barY = (y < 200) ? (y + 50) : (y - 50);
+    let xp = null; // ensure defined before use
 
     // 1) always draw grey track
     g.appendChild(line(xL, barY, xR, barY, COLORS.track, 6));
-
     // 2) draw progress fill and moving dot
-   if (underway) {
-  // draw track
-  g.appendChild(line(xL, barY, xR, barY, COLORS.track, 6));
+    if (underway) {
+      // robust start/end for progress
+      const startStr =
+        r.actualDepartureTime ||
+        r.departureTime ||
+        r.scheduledDepartureTime ||
+        null;
+      const endStr = r.estimatedArrivalTime || null;
 
-  // robust start/end for progress
-  const startStr =
-    r.actualDepartureTime ||
-    r.departureTime ||
-    r.scheduledDepartureTime ||
-    null;
-  const endStr = r.estimatedArrivalTime || null;
+      const pct = computeTransitProgress(startStr, endStr);
 
-   const pct = computeTransitProgress(startStr, endStr);
-
-  // choose x-position for dot
-  let xp;
-    if (pct != null) {
+      // choose x-position for dot
+      if (pct != null) {
         if (dir === "ltr") {
-        xp = xL + (xR - xL) * pct;
-        g.appendChild(line(xL, barY, xp, barY, scheme.strong, 6));  // colored fill
+          xp = xL + (xR - xL) * pct;
+          g.appendChild(line(xL, barY, xp, barY, scheme.strong, 6)); // colored fill
         } else {
-        xp = xR - (xR - xL) * pct;
-        g.appendChild(line(xR, barY, xp, barY, scheme.strong, 6));  // colored fill
+          xp = xR - (xR - xL) * pct;
+          g.appendChild(line(xR, barY, xp, barY, scheme.strong, 6)); // colored fill
         }
-    } else {
+      } else {
         // progress unknown briefly after depart → park dot at origin side
         const origin = toNum(r.originTerminalId);
-        xp = origin === 7 ? xR : origin === 3 ? xL : (dir === "ltr" ? xL : xR);
-    }
+        xp = origin === TERM_SEA ? xR : origin === TERM_BI ? xL : (dir === "ltr" ? xL : xR);
+      }
 
-    // moving dot must always be visible while underway
-    g.appendChild(circleDot(xp, barY, 5.5, scheme.strong));
-    addShipIcon(g, xp, barY);
-
+      // moving dot must always be visible while underway
+      g.appendChild(circleDot(xp, barY, 5.5, scheme.strong));
+      addShipIcon(g, xp, barY);
     } else {
-
       // docked: show dot at bar end closest to current dock (origin of next sailing)
-      // place docked dot by actual origin terminal: 3=BI (left), 7=SEA (right)
-        const origin = toNum(r.originTerminalId);
-        const xp = origin === 7 ? xR : origin === 3 ? xL : (dir === "ltr" ? xL : xR);
+      const origin = toNum(r.originTerminalId);
+      xp = origin === TERM_SEA ? xR : origin === TERM_BI ? xL : (dir === "ltr" ? xL : xR);
 
-    g.appendChild(circleDot(xp, barY, 5.5, scheme.light));
-    addShipIcon(g, xp, barY);
-    // no colored fill while docked
-
+      g.appendChild(circleDot(xp, barY, 5.5, scheme.light));
+      addShipIcon(g, xp, barY);
+      // no colored fill while docked
     }
-  }
+  } // <-- added brace to close the outer `if (dir)` block
+
   // ---- label hooks (docked vs underway) ----
   // recompute bar geometry locally to avoid touching existing logic
   if (dir) {
-    const barWidth = 150;
-    const xL = 200 - barWidth / 2;
-    const xR = 200 + barWidth / 2;
-    const barY = (y < 200) ? (y + 50) : (y - 50);
-    const isTop = y < 200;
-    const labelGapTop = 8;   // vertical gap from bar for top row
-    const labelGapBot = 15;  // vertical gap from bar for bottom row
-    const labelY = isTop ? (barY - labelGapTop) : (barY + labelGapBot);
+    const labelY = barY + LABEL_GAP;
 
     // endpoint x positions
     const originX = (dir === "ltr") ? xL : xR;
     const destX   = (dir === "ltr") ? xR : xL;
 
     // choose anchors so text is horizontally aligned to the bar end
-    // anchors set so text aligns inward to bar ends
-    const originAnchor = (dir === "ltr") ? "end" : "start";
+    const originAnchor = (dir === "ltr") ? "start" : "end";
     const destAnchor   = (dir === "ltr") ? "end" : "start";
-
 
     // strings
     const sched = r.scheduledDepartureTime || r.departureTime || "";
@@ -488,44 +446,39 @@ try {
 
     // draw one label depending on state
     if (!underway && sched) {
-    // docked: place label 20px toward center from the origin end
-    const inward = 40;
-    const originXi = originX + (originX < 200 ? inward : -inward);
 
-    const t = elNS("text", {
-        x: originXi, y: labelY,
-        "text-anchor": originAnchor, // inward-aligned to the bar end
-        fill: "#111",
-        "font-size": "10"
-    });
-    t.textContent = sched;
-    g.appendChild(t);
+      const t = elNS("text", {
+          x: originX, y: labelY,
+          "text-anchor": originAnchor,
+          fill: "#111",
+          "font-size": "10"
+      });
+      t.textContent = sched;
+      g.appendChild(t);
+
     } else if (underway && eta) {
-    // For ETA: top row goes below the line; bottom row stays below as before
-    const etaY = isTop ? (barY + labelGapTop + 8) : (barY + labelGapBot);
+      const etaY = barY + LABEL_GAP;
 
-    const t = elNS("text", {
-        x: destX, y: etaY,
-        "text-anchor": destAnchor,
-        fill: "#111",
-        "font-size": "10"
-    });
-    t.textContent = eta;
-    g.appendChild(t);
+      const t = elNS("text", {
+          x: destX, y: etaY,
+          "text-anchor": destAnchor,
+          fill: "#111",
+          "font-size": "10"
+      });
+      t.textContent = eta;
+      g.appendChild(t);
     }
-
   }
 
   // ferry name
   const name = (r.vessel && String(r.vessel).trim()) ? String(r.vessel) : "—";
-  const nameY = (y >= 200) ? (y - 12) : (y + 20);
-  const tn = elNS("text", { x: 200, y: nameY, "text-anchor": "middle", fill: "#222", "font-size": "12" });
+  const nameY = (y >= CY) ? (y - 12) : (y + 20);
+  const tn = elNS("text", { x: CX, y: nameY, "text-anchor": "middle", fill: "#222", "font-size": "12" });
   tn.textContent = name;
   g.appendChild(tn);
 }
 
-
-  // ---------- face layers ----------
+// ---------- face layers ----------
   function getLayers() {
     // Prefer faceRenderer if present
     if (typeof window.getFaceLayers === "function") {
@@ -553,23 +506,23 @@ try {
     const dockTop = ensure(overlay, "g", { id: "dock-top-arcs" });
     const capacity = ensure(overlay, "g", { id: "capacity-pies" });
     return { overlay, top, bottom, dockTop, capacity, clear() { top.innerHTML = ""; bottom.innerHTML = ""; dockTop.innerHTML = ""; capacity.innerHTML = ""; } };
-
   }
 
   // ---------- static labels once ----------
   function ensureLabels() {
     const svg = document.getElementById("clockFace");
     if (!svg) return;
-    let labels = svg.querySelector("#ferry-rim-labels");
+        let labels = svg.querySelector("#ferry-rim-labels");
     if (!labels) {
-      labels = elNS("g", { id: "ferry-rim-labels", "font-family": "system-ui, Arial, sans-serif" });
-      svg.appendChild(labels);
+        labels = elNS("g", { id: "ferry-rim-labels", "font-family": "system-ui, Arial, sans-serif" });
+        svg.appendChild(labels);
     }
     if (!labels.childNodes || labels.childNodes.length === 0) {
-      const rx = CX + INWARD, ry = CY;
-      labels.appendChild(elText("SEATTLE", rx, ry, { anchor: "middle", fill: "#444", rotate: [90, rx, ry] }));
-      const lx = CX - INWARD, ly = CY;
-      labels.appendChild(elText("BAINBRIDGE ISLAND", lx, ly, { anchor: "middle", fill: "#444", rotate: [-90, lx, ly] }));
+        const rx = CX + RIM_INNER, ry = CY;
+        labels.appendChild(elText("SEATTLE", rx, ry, { anchor: "middle", fill: "#444", rotate: [90, rx, ry] }));
+        const lx = CX - RIM_INNER, ly = CY;
+        labels.appendChild(elText("BAINBRIDGE ISLAND", lx, ly, { anchor: "middle", fill: "#444", rotate: [-90, lx, ly] }));
+
     }
   }
 
@@ -615,7 +568,6 @@ try {
     g.appendChild(img);
   }
 
-
   function ensure(parent, tag, attrs) {
     const id = attrs && attrs.id;
     let node = id ? parent.querySelector(`#${id}`) : null;
@@ -627,6 +579,22 @@ try {
   function toNum(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
 
   // --- time + progress helpers ---
+    // core hh:mm AM/PM → Date parser using a provided base day
+    function parseHHMMBase(hhmm, baseDate) {
+        if (!hhmm || typeof hhmm !== "string" || !(baseDate instanceof Date)) return null;
+        const parts = hhmm.trim().split(/\s+/);
+        if (parts.length < 2) return null;
+        const time = parts[0];
+        const ampm = parts[1].toUpperCase();
+        const [hStr, mStr] = time.split(":");
+        let h = Number(hStr), m = Number(mStr);
+        if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+        if (ampm === "PM" && h !== 12) h += 12;
+        if (ampm === "AM" && h === 12) h = 0;
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), h, m, 0, 0);
+        return Number.isFinite(d.getTime()) ? d : null;
+    }
+
     // Compute progress for an underway trip using today-only times.
     // Rolls the END forward 24h if it is <= START (cross-midnight protection).
     function computeTransitProgress(startStr, endStr) {
@@ -635,60 +603,26 @@ try {
     if (!t0 || !t1) return null;
     let a = t0.getTime();
     let b = t1.getTime();
-    if (b <= a) b += 24 * 60 * 60 * 1000; // allow ETA past midnight
+    if (b <= a) b += DAY_MS; // allow ETA past midnight
     return clamp01((Date.now() - a) / (b - a));
     }
 
   function parseTodayLocal(hhmm) {
-    if (!hhmm || typeof hhmm !== "string") return null;
-    const now = new Date();
-    const [time, ampmRaw] = hhmm.trim().split(/\s+/);
-    if (!time || !ampmRaw) return null;
-    const ampm = ampmRaw.toUpperCase();
-    const [hStr, mStr] = time.split(":");
-    let h = Number(hStr), m = Number(mStr);
-    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
-    if (ampm === "PM" && h !== 12) h += 12;
-    if (ampm === "AM" && h === 12) h = 0;
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
-    return Number.isFinite(d.getTime()) ? d : null;
+    return parseHHMMBase(hhmm, new Date());
   }
+
   function clamp01(x) { return x <= 0 ? 0 : x >= 1 ? 1 : x; }
-// pick the next occurrence of an hh:mm AM/PM within the next 24h
-function parseNextOccurrence(hhmm) {
-  const base = parseTodayLocal(hhmm);
-  if (!base) return null;
-  const now = Date.now();
-  let t = base.getTime();
-  // if that time already passed by >~1 minute, roll it to tomorrow
-  if (t < now - 60 * 1000) t += 24 * 60 * 60 * 1000;
-  return new Date(t);
-}
 
-// --- time + progress helpers ---
-function computeProgress(actualDepartStr, etaStr) {
-  const t0 = parseNextOccurrence(actualDepartStr);
-  const t1 = parseNextOccurrence(etaStr);
-  if (!t0 || !t1) return null;
-  const a = t0.getTime(), b = t1.getTime();
-  if (!(b > a)) return null;
-  const now = Date.now();
-  return clamp01((now - a) / (b - a));
-}
-
-function computeDockProgress(actualArriveStr, schedDepartStr) {
-  const tD = parseNextOccurrence(schedDepartStr);
-  if (!tD) return null;
-
-  let tA = parseNextOccurrence(actualArriveStr);
-  if (!tA) {
-    // fallback dwell of 20 min ending at sched depart, roll if needed
-    tA = new Date(tD.getTime() - 20 * 60 * 1000);
+  // pick the next occurrence of an hh:mm AM/PM within the next 24h
+  function parseNextOccurrence(hhmm) {
+    const base = parseHHMMBase(hhmm, new Date());
+    if (!base) return null;
+    const now = Date.now();
+    let t = base.getTime();
+    // if that time already passed by >~1 minute, roll it to tomorrow
+    if (t < now - MIN_MS) t += DAY_MS;
+    return new Date(t);
   }
-  if (!(tD.getTime() > tA.getTime())) return null;
-  const now = Date.now();
-  return clamp01((now - tA.getTime()) / (tD.getTime() - tA.getTime()));
-}
 
   // debug: mark renderer loaded
   console.log("[ferryClock] ready");
@@ -700,7 +634,7 @@ function computeDockProgress(actualArriveStr, schedDepartStr) {
     let tA = parseNextOccurrence(actualArriveStr);
     if (!tA) {
       // fallback dwell of 20 min ending at scheduled depart
-      tA = new Date(tD.getTime() - 20 * 60 * 1000);
+      tA = new Date(tD.getTime() - DEFAULT_DWELL_MIN * MIN_MS);
     }
     if (!(tD.getTime() > tA.getTime())) return null;
     const now = Date.now();
@@ -710,8 +644,6 @@ function computeDockProgress(actualArriveStr, schedDepartStr) {
     const elapsedMin = elapsedMs / 60000;
     return { tA, tD, dwellMin, elapsedMin };
   }
-
-// --- dock progress + arc helpers ---
 
   function polar(cx, cy, r, aDeg) {
     const a = (aDeg * Math.PI) / 180;
@@ -734,7 +666,7 @@ function drawCapacityPie(g, cx, cy, r, total, avail, color) {
       fill: "none",
       stroke: "#ddd",
       "stroke-width": RING_W,
-      "stroke-linecap": "butt"
+      "stroke-linecap": STROKE_CAP
     }));
     // white center to force donut look on non-white backgrounds
     g.appendChild(elNS("circle", {
@@ -752,20 +684,23 @@ function drawCapacityPie(g, cx, cy, r, total, avail, color) {
   g.appendChild(elNS("circle", {
     cx, cy, r,
     fill: "none",
-    stroke: (COLORS && COLORS.track) ? COLORS.track : "#e5e7eb",
+    stroke: COLORS.track,
     "stroke-width": RING_W,
-    "stroke-linecap": "butt"
+    "stroke-linecap": STROKE_CAP
   }));
 
-  // availability as an arc along the ring, starting at 12 o'clock
-  const frac = Math.max(0, Math.min(1, A / T));
-  if (frac > 0) {
+    // availability as an arc along the ring, starting at 12 o'clock
+    const frac = Math.max(0, Math.min(1, A / T));
+    // Avoid 360°, which renders no arc in SVG
+    const sweep = Math.min(359.9, frac * 360);
+    if (sweep > 0) {
     const path = elNS("path", {
-      d: arcPath(cx, cy, r, -90, frac * 360),
+        d: arcPath(cx, cy, r, -90, sweep),
+
       fill: "none",
       stroke: color,
       "stroke-width": RING_W,
-      "stroke-linecap": "butt"
+      "stroke-linecap": STROKE_CAP
     });
     g.appendChild(path);
   }
