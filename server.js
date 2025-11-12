@@ -81,44 +81,6 @@ async function getJson(u) {
   const ct = res.headers.get("content-type") || "";
   return ct.includes("json") ? res.json() : res.text();
 }
-// ---- routes helper (safe fetch with fallback) ----
-async function getRoutesSafe() {
-  const base = "https://www.wsdot.wa.gov/Ferries/API";
-  const key  = KEY;
-  const url  = `${base}/Routes/rest/routes?apiaccesscode=${key}`;
-
-  // local fallback (kept inside the function to avoid global duplicates)
-  const FALLBACK = [
-    {
-      routeId: 5,
-      name: "Seattle ↔ Bainbridge Island",
-      terminals: [
-        { id: 7, name: "Seattle" },
-        { id: 3, name: "Bainbridge Island" }
-      ]
-    }
-  ];
-
-  try {
-    const raw = await getJson(url);
-    if (!Array.isArray(raw)) return FALLBACK;
-
-    const norm = raw.map(r => ({
-      routeId: Number(r.RouteID),
-      name: r.RouteName || "",
-      terminals: Array.isArray(r.Terminals) ? r.Terminals.map(t => ({
-        id: Number(t.TerminalID),
-        name: t.TerminalName || ""
-      })) : []
-    }));
-
-    // only keep routes that have at least 2 terminals
-    const cleaned = norm.filter(r => r.routeId && r.name && r.terminals.length >= 2);
-    return cleaned.length ? cleaned : FALLBACK;
-  } catch {
-    return FALLBACK;
-  }
-}
 
 // ---- route metadata helper: resilient, env-driven fallback ----
 async function getRoutesSafe() {
@@ -159,15 +121,6 @@ async function getRoutesSafe() {
     ];
   }
 }
-
-// ---- routes endpoint ----
-app.get("/api/routes", async (req, res) => {
-  try {
-    res.json(await getRoutesSafe());
-  } catch (e) {
-    res.status(500).json({ error: "route list failed", detail: String(e?.message || e) });
-  }
-});
 
 // --- dynamic route metadata endpoint ---
 async function pollOnce() {
@@ -468,21 +421,13 @@ async function pollOnce() {
 setInterval(pollOnce, INTERVAL);
 pollOnce(); // kick off immediately
 
+
+
 // API
-// Returns all routes and their terminals for client settings
+// ---- routes endpoint ----
 app.get("/api/routes", async (req, res) => {
   try {
-    const u = `${BASE}/Routes/rest/routes?apiaccesscode=${KEY}`;
-    const routes = await getJson(u);
-    const out = (Array.isArray(routes) ? routes : []).map(r => ({
-      routeId: Number(r.RouteID),
-      name: r.RouteName || "",
-      terminals: (Array.isArray(r.Terminals) ? r.Terminals : []).map(t => ({
-        id: Number(t.TerminalID),
-        name: t.TerminalName || ""
-      }))
-    }));
-    res.json(out);
+    res.json(await getRoutesSafe());
   } catch (e) {
     res.status(500).json({ error: "route list failed", detail: String(e?.message || e) });
   }
