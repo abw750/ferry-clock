@@ -260,58 +260,118 @@ function assignSlots(rows) {
       }
       drawRow(top,    slotRows[0] || null, 95);
       drawRow(bottom, slotRows[1] || null, 305);
-       // ---- capacity pies (always show two, BI on left, SEA on right) ----
-       const capG = layers.capacity;
-       if (capG) {
-         capG.innerHTML = "";
 
-       // robust origin resolver: prefer IDs, else direction text, else infer from destination
-         const ORIGIN = { SEA: TERM_SEA, BI: TERM_BI };
-         function originIdOf(r){
-           const id = Number(r?.originTerminalId);
-           if (id === TERM_SEA || id === TERM_BI) return id;
-           const dir = String(r?.direction || "").toLowerCase();
-           if (dir.includes("leave seattle") || dir.includes("seattle →") || dir.includes("seattle to")) return TERM_SEA;
-           if (dir.includes("leave bainbridge") || dir.includes("bainbridge →") || dir.includes("bainbridge to")) return TERM_BI;
-           const dst = Number(r?.destinationTerminalId);
-           if (dst === TERM_SEA) return TERM_BI;
-           if (dst === TERM_BI) return TERM_SEA;
-           return null;
-         }
-         // next scheduled departure in the future from an origin
-         function nextFrom(originId){
-           const now = Date.now();
-           const items = _rows
-               .filter(r => originIdOf(r) === originId && r?.scheduledDepartureTime)
-               .map(r => ({ r, t: parseNextOccurrence(r.scheduledDepartureTime)?.getTime() || Infinity }))
-               .filter(x => x.t !== Infinity && x.t >= now - 60*1000)
-               .sort((a,b) => a.t - b.t);
-           return items.length ? items[0].r : null;
-         }
+// ---- capacity pies (always show two, BI on left, SEA on right) ----
+const capG = layers.capacity;
+if (capG) {
+  capG.innerHTML = "";
 
-         const rowSEA = nextFrom(TERM_SEA);
-         const rowBI  = nextFrom(TERM_BI);
+  // robust origin resolver: prefer IDs, else direction text, else infer from destination
+  const ORIGIN = { SEA: TERM_SEA, BI: TERM_BI };
+  function originIdOf(r){
+    const id = Number(r?.originTerminalId);
+    if (id === TERM_SEA || id === TERM_BI) return id;
+    const dir = String(r?.direction || "").toLowerCase();
+    if (dir.includes("leave seattle") || dir.includes("seattle →") || dir.includes("seattle to")) return TERM_SEA;
+    if (dir.includes("leave bainbridge") || dir.includes("bainbridge →") || dir.includes("bainbridge to")) return TERM_BI;
+    const dst = Number(r?.destinationTerminalId);
+    if (dst === TERM_SEA) return TERM_BI;
+    if (dst === TERM_BI) return TERM_SEA;
+    return null;
+  }
 
-        // geometry: centered on 3–9 axis, near labels
-        const R = CAP_PIE_R;        // radius of small pies
-        const yC = CY;
-        const xSeattle = CX + RIM_INNER - CAP_PIE_X_OFFSET;  // just left of "SEATTLE"
-        const xBain    = CX - RIM_INNER + CAP_PIE_X_OFFSET;  // just right of "BAINBRIDGE ISLAND"
+  // next scheduled departure in the future from an origin
+  function nextFrom(originId){
+    const now = Date.now();
+    const items = _rows
+      .filter(r => originIdOf(r) === originId && r?.scheduledDepartureTime)
+      .map(r => ({ r, t: parseNextOccurrence(r.scheduledDepartureTime)?.getTime() || Infinity }))
+      .filter(x => x.t !== Infinity && x.t >= now - 60*1000)
+      .sort((a,b) => a.t - b.t);
+    return items.length ? items[0].r : null;
+  }
 
-        // Always render both pies. If data missing, show placeholder ring with "—".
-        {
-          const totalSEA = rowSEA && Number.isFinite(Number(rowSEA.carSlotsTotal)) ? Number(rowSEA.carSlotsTotal) : 0;
-          const availSEA = rowSEA && Number.isFinite(Number(rowSEA.carSlotsAvailable)) ? Math.max(0, Number(rowSEA.carSlotsAvailable)) : 0;
-          drawCapacityPie(capG, xSeattle, yC, R, totalSEA, availSEA, COLORS.rtl.strong);
-        }
-        {
-          const totalBI = rowBI && Number.isFinite(Number(rowBI.carSlotsTotal)) ? Number(rowBI.carSlotsTotal) : 0;
-          const availBI = rowBI && Number.isFinite(Number(rowBI.carSlotsAvailable)) ? Math.max(0, Number(rowBI.carSlotsAvailable)) : 0;
-          drawCapacityPie(capG, xBain, yC, R, totalBI, availBI, COLORS.ltr.strong);
-        }
-      }
+  const rowSEA = nextFrom(TERM_SEA);
+  const rowBI  = nextFrom(TERM_BI);
+
+  // geometry: centered on 3–9 axis, near labels
+  const R = CAP_PIE_R;        // radius of small pies
+  const yC = CY;
+  const xSeattle = CX + RIM_INNER - CAP_PIE_X_OFFSET;  // just left of "SEATTLE"
+  const xBain    = CX - RIM_INNER + CAP_PIE_X_OFFSET;  // just right of "BAINBRIDGE ISLAND"
+
+ // Sticky cache for capacity pies — survives reloads via localStorage
+const CAP_STICKY_KEY = "capStickyV1";
+function loadCapSticky() {
+  try { return JSON.parse(localStorage.getItem(CAP_STICKY_KEY) || "") || null; } catch { return null; }
+}
+function saveCapSticky(obj) { try { localStorage.setItem(CAP_STICKY_KEY, JSON.stringify(obj)); } catch {} }
+
+window.__capSticky = loadCapSticky() || {
+  SEA: { total: null, avail: null, tTotal: 0, tAvail: 0 },
+  BI:  { total: null, avail: null, tTotal: 0, tAvail: 0 }
+};
+
+// Returns sticky values; never force 0 on brief nulls
+function sticky(originKey, nextTotal, nextAvail) {
+  const rec = window.__capSticky[originKey] || { total: null, avail: null, tTotal: 0, tAvail: 0 };
+  const now = Date.now();
+
+  // independent clocks for total vs avail
+  const SOFT_TTL_AVAIL_MS = 5 * 60 * 1000;  // keep last avail up to 5 min
+  const HARD_TTL_AVAIL_MS = 20 * 60 * 1000; // drop after 20 min with no updates
+
+  // TOTAL: accept any finite value immediately
+  if (Number.isFinite(nextTotal) && nextTotal >= 0) {
+    rec.total = nextTotal;
+    rec.tTotal = now;
+  }
+
+  // AVAIL: accept any finite value immediately
+  if (Number.isFinite(nextAvail) && nextAvail >= 0) {
+    rec.avail = nextAvail;
+    rec.tAvail = now;
+  } else {
+    // feed has null/zero/NaN: keep last known within TTL windows
+    const age = now - rec.tAvail;
+    if (rec.avail != null) {
+      // keep last for soft window; after hard window, mark unknown (null), do NOT force 0
+      if (age > HARD_TTL_AVAIL_MS) rec.avail = null;
     }
-  };
+  }
+
+  window.__capSticky[originKey] = rec;
+  saveCapSticky(window.__capSticky);
+
+  // Outputs: numbers; when unknown, fall back to 0 total/avail for drawing but avoid
+  // sudden zeroing during soft outages because rec.avail is preserved above.
+  const outTotal = Number.isFinite(rec.total) ? Math.max(0, rec.total) : 0;
+  const outAvail = Number.isFinite(rec.avail) ? Math.max(0, rec.avail) : 0;
+  return { total: outTotal, avail: outAvail };
+}
+
+
+  // --- SEA (right pie) ---
+  {
+    const nextTotal = rowSEA && Number.isFinite(Number(rowSEA?.carSlotsTotal)) ? Number(rowSEA.carSlotsTotal) : null;
+    const nextAvail = rowSEA && Number.isFinite(Number(rowSEA?.carSlotsAvailable)) ? Math.max(0, Number(rowSEA.carSlotsAvailable)) : null;
+    const { total, avail } = sticky("SEA", nextTotal, nextAvail);
+    drawCapacityPie(capG, xSeattle, yC, R, total, avail, COLORS.rtl.strong);
+  }
+
+  // --- BI (left pie) ---
+  {
+    const nextTotal = rowBI && Number.isFinite(Number(rowBI?.carSlotsTotal)) ? Number(rowBI.carSlotsTotal) : null;
+    const nextAvail = rowBI && Number.isFinite(Number(rowBI?.carSlotsAvailable)) ? Math.max(0, Number(rowBI.carSlotsAvailable)) : null;
+    const { total, avail } = sticky("BI", nextTotal, nextAvail);
+    drawCapacityPie(capG, xBain, yC, R, total, avail, COLORS.ltr.strong);
+  }
+} // end if (capG)
+
+    } // end render()
+  }; // end window.ferry
+
+
   // Back-compat shim
   window.updateFerryClock = function updateFerryClock(summaryRows) {
     window.ferry.setData(summaryRows);
@@ -349,6 +409,7 @@ function drawRow(g, r, y) {
 
     // underway heuristic
     const underway = isUnderway(r);
+
     // shared bar geometry for transit and labels
     const barWidth = BAR_W;
     const xL = CX - barWidth / 2;
@@ -425,7 +486,7 @@ function drawRow(g, r, y) {
       addShipIcon(g, xp, barY);
       // no colored fill while docked
     }
-  } // <-- added brace to close the outer `if (dir)` block
+  } 
 
   // ---- label hooks (docked vs underway) ----
   // recompute bar geometry locally to avoid touching existing logic
@@ -442,7 +503,8 @@ function drawRow(g, r, y) {
 
     // strings
     const sched = r.scheduledDepartureTime || r.departureTime || "";
-    const eta   = r.estimatedArrivalTime   || "";
+    const eta   = stickyEta(r.vessel, r.estimatedArrivalTime, underway);
+
 
     // draw one label depending on state
     if (!underway && sched) {
@@ -623,6 +685,18 @@ function drawRow(g, r, y) {
     if (t < now - MIN_MS) t += DAY_MS;
     return new Date(t);
   }
+  // pick the most recent occurrence of an hh:mm AM/PM at or before now
+  function parsePrevOccurrence(hhmm) {
+    const base = parseHHMMBase(hhmm, new Date());
+    if (!base) return null;
+    const now = Date.now();
+    let t = base.getTime();
+    // if that time is in the future by >~1 minute, roll it to yesterday
+    if (t > now + MIN_MS) t -= DAY_MS;
+    // if it’s slightly ahead due to rounding, clamp to now - 1s
+    if (t > now) t = now - 1000;
+    return new Date(t);
+  }
 
   // debug: mark renderer loaded
   console.log("[ferryClock] ready");
@@ -631,7 +705,7 @@ function drawRow(g, r, y) {
   function getDockWindow(actualArriveStr, schedDepartStr) {
     const tD = parseNextOccurrence(schedDepartStr);
     if (!tD) return null;
-    let tA = parseNextOccurrence(actualArriveStr);
+    let tA = parsePrevOccurrence(actualArriveStr);
     if (!tA) {
       // fallback dwell of 20 min ending at scheduled depart
       tA = new Date(tD.getTime() - DEFAULT_DWELL_MIN * MIN_MS);
@@ -649,6 +723,48 @@ function drawRow(g, r, y) {
     const a = (aDeg * Math.PI) / 180;
     return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
   }
+
+// --- ETA stickiness: only after first valid ETA ("armed"), short TTL while underway ---
+window.__etaSticky = window.__etaSticky || Object.create(null);
+/**
+ * Returns the ETA string to display. Behavior:
+ * - While docked: no stickiness; ETA clears.
+ * - While underway:
+ *    - Before first valid ETA appears: returns "" (no fallback).
+ *    - After a valid ETA appeared once ("armed"): if a later cycle drops ETA,
+ *      reuse the last ETA for up to TTL_MS, then clear if still missing.
+ */
+function stickyEta(vesselName, nextEtaStr, underway) {
+  const v = (vesselName && String(vesselName).trim()) || "";
+  if (!v) return nextEtaStr || "";
+
+  const TTL_MS = 90 * 1000; // 90s reuse window
+  const now = Date.now();
+  const rec = (window.__etaSticky[v] ||= { armed: false, value: "", t: 0 });
+
+  if (!underway) {
+    rec.armed = false;
+    rec.value = "";
+    rec.t = now;
+    return nextEtaStr || "";
+  }
+
+  const clean = (s) => (s && s !== "—") ? String(s) : "";
+  const nxt = clean(nextEtaStr);
+
+  if (nxt) {
+    rec.armed = true;
+    rec.value = nxt;
+    rec.t = now;
+    return nxt;
+  }
+
+  if (rec.armed && (now - rec.t) <= TTL_MS && rec.value) {
+    return rec.value;
+  }
+  return "";
+}
+  
 // ---- capacity pie helpers ----
 // visual tuning knob: donut ring thickness in px
 const RING_W = 6;
@@ -736,4 +852,5 @@ function arcPath(cx, cy, r, startDeg, sweepDeg) {
   return `M ${x0} ${y0} A ${r} ${r} 0 ${large} ${sweep} ${x1} ${y1}`;
 }
 
+// end IIFE
 })();

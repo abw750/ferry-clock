@@ -12,6 +12,54 @@ const els = {
 
 const INTERVAL_MS = 60_000;
 
+// ---- last-good summary cache (client-side) ----
+const SUMMARY_CACHE_KEY = "ferryLastGoodSummary.v1";
+const SUMMARY_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function loadLastGood() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SUMMARY_CACHE_KEY) || "null");
+    if (!raw || !Array.isArray(raw.data)) return null;
+    if (typeof raw.t !== "number" || (Date.now() - raw.t) > SUMMARY_TTL_MS) return null;
+    return raw.data;
+  } catch { return null; }
+}
+
+function saveLastGood(data) {
+  try { localStorage.setItem(SUMMARY_CACHE_KEY, JSON.stringify({ t: Date.now(), data })); } catch {}
+}
+
+// minimal schema guard for the clock face
+function isGoodRow(r) {
+  if (!r || typeof r !== "object") return false;
+  const hasVessel = r.vessel && String(r.vessel).trim();
+  const hasSched  = r.scheduledDepartureTime && String(r.scheduledDepartureTime).trim();
+  if (!hasVessel && !hasSched) return false;
+
+  // soft type checks
+  const numish = (x) => x == null || Number.isFinite(Number(x));
+  const strish = (x) => x == null || typeof x === "string";
+
+  return (
+    strish(r.vessel) &&
+    strish(r.direction) &&
+    strish(r.departureTime) &&
+    strish(r.scheduledDepartureTime) &&
+    strish(r.estimatedArrivalTime) &&
+    strish(r.actualArrivalTime) &&
+    numish(r.originTerminalId) &&
+    numish(r.destinationTerminalId) &&
+    numish(r.carSlotsTotal) &&
+    numish(r.carSlotsAvailable)
+  );
+}
+
+function validateSummary(arr) {
+  if (!Array.isArray(arr)) return null;
+  const cleaned = arr.filter(isGoodRow).slice(0, 2);
+  return cleaned.length ? cleaned : null;
+}
+
 // normalize actual-arrival field from API, with key scan fallback
 function getActualArrival(r) {
   // common names first
@@ -34,7 +82,6 @@ function getActualArrival(r) {
   }
   return null;
 }
-
 
 // --- helpers (top-level) ---
 if (typeof nz !== "function") {
@@ -93,6 +140,8 @@ async function doRefresh() {
 
 async function fetchAndRender() {
   setStatus("Loading...");
+
+  // status first (non-fatal)
   const status = await getJson("/api/status");
   if (status?.lastError) {
     setStatus(`Backend error: ${status.lastError}`, true);
@@ -101,6 +150,7 @@ async function fetchAndRender() {
     setStatus(`Fetched at ${ts}`);
   }
 
+  // raw view bypasses cache
   if (showRaw) {
     const raw = await getJson("/api/raw");
     ensurePre();
@@ -109,71 +159,66 @@ async function fetchAndRender() {
     return;
   }
 
-  // table view using /api/summary
+  // try live summary
   let summary = await getJson("/api/summary");
-  if (!Array.isArray(summary)) summary = [];
+  let good = validateSummary(summary);
 
-// DEBUG: log first two ferry rows for verification
-(function() {
-  const slice = summary.slice(0, 2);
-  const names   = slice.map(r => r?.vessel || null);
-  const origins = slice.map(r => r?.originTerminalId || null);
-  const dests   = slice.map(r => r?.destinationTerminalId || null);
-  const status  = slice.map(r => r?.status || null);
-  console.log("summary[0..1]", { names, origins, dests, status });
-
-  // ARRIVAL FIELD DIAG
-slice.forEach((r, i) => {
-  const keys = Object.keys(r || {});
-  const arrivalKeys = keys.filter(k => /arriv/i.test(k));
-  const diag = {};
-  arrivalKeys.forEach(k => { diag[k] = r[k]; });
-  console.log(`ARRIVAL DIAG [${i}] ${r?.vessel || "?"}:`, diag);
-});
-// Tacoma-specific dump
-const tac = summary.find(r => r?.vessel === "Tacoma");
-console.log("ARRIVAL DIAG Tacoma full keys:", tac ? Object.keys(tac) : "not found");
-if (tac) {
-  const tdiag = {};
-  Object.keys(tac).forEach(k => { if (/arriv/i.test(k)) tdiag[k] = tac[k]; });
-  console.log("ARRIVAL DIAG Tacoma arrivals:", tdiag);
-}
-
-
-  // DIAG: scheduled rows lacking actual arrival across possible keys
-  const schedNoArr = summary.filter(r =>
-    String(r?.status || "").toLowerCase() !== "intransit" &&
-    !getActualArrival(r)
-  );
-  if (schedNoArr.length) {
-    console.log("DIAG scheduled-without-actualArrival:", schedNoArr.map(r => r.vessel));
-    schedNoArr.slice(0, 2).forEach((r, i) => {
-      console.log(`DIAG row[${i}] full:`, r);
-      console.log(`DIAG row[${i}] keys:`, Object.keys(r));
-    });
+  if (good) {
+    ensureTable();
+    renderSummaryTable(good);
+    try {
+      if (window.ferry?.setData && window.ferry?.render) {
+        window.ferry.setData(good);
+        window.ferry.render();
+      } else if (typeof window.updateFerryClock === "function") {
+        window.updateFerryClock(good);
+      }
+    } catch (e) {
+      console.warn("ferry render failed:", e);
+    }
+    els.count.textContent = `${good.length} rows`;
+    saveLastGood(good);
+    return;
   }
-})();
 
+  // live bad → use last-good within TTL
+  const cached = loadLastGood();
+  if (cached) {
+    console.warn("[ferry] using last-good cached summary");
+    ensureTable();
+    renderSummaryTable(cached);
+    try {
+      if (window.ferry?.setData && window.ferry?.render) {
+        window.ferry.setData(cached);
+        window.ferry.render();
+      } else if (typeof window.updateFerryClock === "function") {
+        window.updateFerryClock(cached);
+      }
+    } catch (e) {
+      console.warn("ferry render failed (cached):", e);
+    }
+    els.count.textContent = `${cached.length} rows`;
+    return;
+  }
 
+  // nothing usable
+  console.warn("[ferry] no live or cached summary available");
   ensureTable();
-  renderSummaryTable(summary);
-
-  // update the clock, if available (never throw)
+  renderSummaryTable([]);
   try {
-    if (window.ferry && typeof window.ferry.setData === "function" && typeof window.ferry.render === "function") {
-      window.ferry.setData(summary);
+    if (window.ferry?.setData && window.ferry?.render) {
+      window.ferry.setData([]);
       window.ferry.render();
     } else if (typeof window.updateFerryClock === "function") {
-      window.updateFerryClock(summary);
+      window.updateFerryClock([]);
     }
+  } catch (e) {
+    console.warn("ferry render failed (empty):", e);
   }
-
-  catch (e) {
-    console.warn("ferry render failed:", e);
-  }
-
-  els.count.textContent = `${summary.length} rows`;
+  els.count.textContent = `0 rows`;
 }
+
+
 
 // ---------- rendering ----------
 

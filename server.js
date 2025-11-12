@@ -37,10 +37,10 @@ app.use((req, res, next) => {
 
 const {
   WSDOT_API_KEY: KEY,
-  ROUTE_ID = "5",
-  SEA_TERMINAL_ID = "3",
-  BI_TERMINAL_ID = "7",
-  POLL_MS = "60000",
+  ROUTE_ID,
+  SEA_TERMINAL_ID,
+  BI_TERMINAL_ID,
+  POLL_MS,
 } = process.env;
 
 const BASE = "https://www.wsdot.wa.gov/Ferries/API";
@@ -81,7 +81,95 @@ async function getJson(u) {
   const ct = res.headers.get("content-type") || "";
   return ct.includes("json") ? res.json() : res.text();
 }
+// ---- routes helper (safe fetch with fallback) ----
+async function getRoutesSafe() {
+  const base = "https://www.wsdot.wa.gov/Ferries/API";
+  const key  = KEY;
+  const url  = `${base}/Routes/rest/routes?apiaccesscode=${key}`;
 
+  // local fallback (kept inside the function to avoid global duplicates)
+  const FALLBACK = [
+    {
+      routeId: 5,
+      name: "Seattle ↔ Bainbridge Island",
+      terminals: [
+        { id: 7, name: "Seattle" },
+        { id: 3, name: "Bainbridge Island" }
+      ]
+    }
+  ];
+
+  try {
+    const raw = await getJson(url);
+    if (!Array.isArray(raw)) return FALLBACK;
+
+    const norm = raw.map(r => ({
+      routeId: Number(r.RouteID),
+      name: r.RouteName || "",
+      terminals: Array.isArray(r.Terminals) ? r.Terminals.map(t => ({
+        id: Number(t.TerminalID),
+        name: t.TerminalName || ""
+      })) : []
+    }));
+
+    // only keep routes that have at least 2 terminals
+    const cleaned = norm.filter(r => r.routeId && r.name && r.terminals.length >= 2);
+    return cleaned.length ? cleaned : FALLBACK;
+  } catch {
+    return FALLBACK;
+  }
+}
+
+// ---- route metadata helper: resilient, env-driven fallback ----
+async function getRoutesSafe() {
+  const base = "https://www.wsdot.wa.gov/Ferries/API";
+  const url  = `${base}/Routes/rest/routes?apiaccesscode=${KEY}`;
+
+  try {
+    const raw = await getJson(url);
+    if (!Array.isArray(raw)) throw new Error("invalid payload");
+
+    return raw.map(r => ({
+      routeId: Number(r.RouteID),
+      name: r.RouteName || "",
+      terminals: Array.isArray(r.Terminals)
+        ? r.Terminals.map(t => ({
+            id: Number(t.TerminalID),
+            name: t.TerminalName || ""
+          }))
+        : []
+    }));
+  } catch {
+    // fallback uses .env values only — no hard-coded text
+    return [
+      {
+        routeId: Number(process.env.ROUTE_ID),
+        name: process.env.ROUTE_NAME || "Unknown Route",
+        terminals: [
+          {
+            id: Number(process.env.SEA_TERMINAL_ID),
+            name: process.env.SEA_TERMINAL_NAME || String(process.env.SEA_TERMINAL_ID)
+          },
+          {
+            id: Number(process.env.BI_TERMINAL_ID),
+            name: process.env.BI_TERMINAL_NAME || String(process.env.BI_TERMINAL_ID)
+          }
+        ]
+      }
+    ];
+  }
+}
+
+// ---- routes endpoint ----
+app.get("/api/routes", async (req, res) => {
+  try {
+    res.json(await getRoutesSafe());
+  } catch (e) {
+    res.status(500).json({ error: "route list failed", detail: String(e?.message || e) });
+  }
+});
+
+// --- dynamic route metadata endpoint ---
 async function pollOnce() {
   try {
     const [todayRaw, locs, sea, bi, stats] = await Promise.all([
@@ -377,11 +465,29 @@ async function pollOnce() {
   }
 }
 
-
 setInterval(pollOnce, INTERVAL);
 pollOnce(); // kick off immediately
 
 // API
+// Returns all routes and their terminals for client settings
+app.get("/api/routes", async (req, res) => {
+  try {
+    const u = `${BASE}/Routes/rest/routes?apiaccesscode=${KEY}`;
+    const routes = await getJson(u);
+    const out = (Array.isArray(routes) ? routes : []).map(r => ({
+      routeId: Number(r.RouteID),
+      name: r.RouteName || "",
+      terminals: (Array.isArray(r.Terminals) ? r.Terminals : []).map(t => ({
+        id: Number(t.TerminalID),
+        name: t.TerminalName || ""
+      }))
+    }));
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: "route list failed", detail: String(e?.message || e) });
+  }
+});
+
 app.get("/api/summary", (req, res) => res.json(cache.summary));
 app.get("/api/raw", (req, res) => res.json(cache));
 // Shows the live vessel fields we need, from the existing cache.debug.locs
