@@ -225,6 +225,28 @@ function assignSlots(rows) {
     if (!slotRows[0] && _rows[0]) slotRows[0] = _rows[0];
     if (!slotRows[1] && _rows[1]) slotRows[1] = _rows[1];
 
+    // hard de-duplication: never show the same vessel in both slots
+    if (slotRows[0]?.vessel && slotRows[1]?.vessel &&
+        String(slotRows[0].vessel).trim() === String(slotRows[1].vessel).trim()) {
+
+      const dupName = String(slotRows[0].vessel).trim();
+
+      // prefer replacing the bottom slot with the earliest alternative that is not the duplicate
+      const replacement = earliestUpcoming(_rows, dupName);
+
+      // if no alternative is available, try a dock snapshot of any other mapped vessel
+      const vsList = vesselsBySlot().filter(v => v && v !== dupName);
+      const snap = vsList.length ? getDockSnapshot(vsList[0]) : null;
+
+      slotRows[1] = replacement || snap || null;
+
+      // if still null, keep only the top slot populated and leave bottom empty
+      if (!slotRows[1]) {
+        console.warn("[ferry] de-dup: only one vessel available; hiding duplicate in bottom slot:", dupName);
+      }
+    }
+
+
       // 12 o'clock dock arcs: only when docked. No track when underway.
       if (dockTop) {
         for (let slot = 0; slot <= 1; slot++) {
