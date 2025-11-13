@@ -174,7 +174,33 @@ function assignSlots(rows) {
     if (saved[v] === 0 || saved[v] === 1) _slotByVessel[v] = saved[v];
   }
 
-  // assign new vessels to the first free slot, then persist
+  // collect distinct current vessel names
+  const names = Array.from(
+    new Set(
+      (Array.isArray(rows) ? rows : [])
+        .map(r => (r && r.vessel && String(r.vessel).trim()) || null)
+        .filter(Boolean)
+    )
+  );
+
+  // If no mapping exists yet for these vessels and we have exactly two,
+  // assign deterministically: alphabetically (case-insensitive) → top(0), bottom(1).
+  // This avoids per-environment randomness on first load.
+  const needsDeterministicInit =
+    names.length === 2 &&
+    names.every(v => !(_slotByVessel[v] === 0 || _slotByVessel[v] === 1));
+
+  if (needsDeterministicInit) {
+    const sorted = [...names].sort((a, b) =>
+      a.localeCompare(b, "en", { sensitivity: "base" })
+    );
+    _slotByVessel[sorted[0]] = 0; // top
+    _slotByVessel[sorted[1]] = 1; // bottom
+    saveSlotMap(_slotByVessel);
+    return; // done
+  }
+
+  // Otherwise: assign any newly-seen vessel to the first free slot (stable thereafter)
   rows.forEach(r => {
     const v = (r && r.vessel && String(r.vessel).trim()) || null;
     if (!v) return;
@@ -184,9 +210,16 @@ function assignSlots(rows) {
     }
   });
 
-  // persist after any additions
   saveSlotMap(_slotByVessel);
 }
+
+// Optional: manual reset from DevTools console, then hard-reload
+window.ferryResetSlots = function ferryResetSlots() {
+  try { localStorage.removeItem("ferrySlotMap"); } catch {}
+  for (const k in _slotByVessel) delete _slotByVessel[k];
+  console.log("[ferry] slot map cleared; will reassign deterministically on next render");
+};
+
 
   // --- public API ---
     window.ferry = {
