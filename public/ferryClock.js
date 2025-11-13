@@ -224,7 +224,10 @@ function assignSlots(rows) {
 
   // --- public API ---
     window.ferry = {
-    setData(rows) {
+      setData(rows) {
+
+        window.__lastSetData = rows;
+
         _rows = Array.isArray(rows) ? rows : [];
         assignSlots(_rows);
 
@@ -251,9 +254,19 @@ function assignSlots(rows) {
     if (!slotRows[0] && vs[0]) slotRows[0] = getDockSnapshot(vs[0]);
     if (!slotRows[1] && vs[1]) slotRows[1] = getDockSnapshot(vs[1]);
 
-    // backfill any missing slot with earliest upcoming, avoiding duplicate vessel
-    if (!slotRows[0]) slotRows[0] = earliestUpcoming(_rows, slotRows[1]?.vessel || null);
-    if (!slotRows[1]) slotRows[1] = earliestUpcoming(_rows, slotRows[0]?.vessel || null);
+    // NEW fail-safe behavior: never replace a missing vessel with another vessel.
+    // If API temporarily drops the vessel, fall back to dock snapshot or retain null.
+    if (!slotRows[0] && vs[0]) {
+      // keep last-known vessel state
+      const snap0 = getDockSnapshot(vs[0]);
+      if (snap0) slotRows[0] = snap0;
+    }
+
+    if (!slotRows[1] && vs[1]) {
+      const snap1 = getDockSnapshot(vs[1]);
+      if (snap1) slotRows[1] = snap1;
+    }
+
 
     // final safety
     if (!slotRows[0] && _rows[0]) slotRows[0] = _rows[0];
@@ -291,8 +304,6 @@ function assignSlots(rows) {
       }
 }
 
-
-
       // 12 o'clock dock arcs: only when docked. No track when underway.
       if (dockTop) {
         for (let slot = 0; slot <= 1; slot++) {
@@ -310,19 +321,57 @@ function assignSlots(rows) {
             }
           }
           const scheme = dir === "ltr" ? COLORS.ltr : COLORS.rtl;
-          const underway = isUnderway(rr);
+          const statusText = String(rr?.status || "").toLowerCase();
+          // robust dock detection: WSDOT sends "scheduled" even when actually at dock
+          const nowMs = Date.now();
+          const schedMs = parseNextOccurrence(rr?.scheduledDepartureTime)?.getTime() || null;
 
-          if (rr && !underway) {
-            const arrive = getActualArrivalLocal(rr);
-            const win = getDockWindow(arrive, rr.scheduledDepartureTime);
-            if (win) {
-              // Start angle = arrival minute on the rim
-              const startDeg = -90 + (win.tA.getMinutes() % 60) * 6;
-              // Sweep = elapsed minutes * 6° per minute; pass as a fraction of 60 minutes
-              const sweepDeg = Math.max(0, Math.min(win.elapsedMin, win.dwellMin)) * 6;
-              const pctOfCircle = sweepDeg / 360; // drawDockTopArc expects fraction of a full circle
-              drawDockTopArc(dockTop, slot, pctOfCircle, scheme.light, startDeg);
+          const arrStr = getActualArrivalLocal(rr);
+          const arrPrev = arrStr ? parsePrevOccurrence(arrStr)?.getTime() : null;
+
+          // A vessel is docked when:
+          // - it has NOT departed (actualDepartureTime == null)
+          // - scheduled departure is still in the future
+          // - AND either actual arrival is null OR arrival is in the past
+          // - AND not underway (no ETA)
+          const docked =
+            !rr.actualDepartureTime &&
+            schedMs && schedMs > nowMs &&
+            (!rr.estimatedArrivalTime || rr.estimatedArrivalTime === "—") &&
+            (arrPrev == null || arrPrev < nowMs);
+
+
+
+          if (rr && docked) {
+            // For dock arcs, ignore departure time entirely.
+            // Use elapsed time since arrival, capped at 60 minutes.
+            const arriveStr = getActualArrivalLocal(rr);
+            let tA = arriveStr ? parsePrevOccurrence(arriveStr) : null;
+
+            if (!tA) {
+              // Fallback: assume arrival was DEFAULT_DWELL_MIN minutes ago.
+              tA = new Date(Date.now() - DEFAULT_DWELL_MIN * MIN_MS);
             }
+
+            const now = Date.now();
+            const elapsedMin = Math.max(0, (now - tA.getTime()) / 60000);
+            const activeMin = Math.min(elapsedMin, 60); // cap at 60 minutes for a full circle
+
+            // Start angle = arrival minute on the rim
+            const startDeg =
+              -90 +
+              (
+                (
+                  (tA.getHours() * 3600 +
+                  tA.getMinutes() * 60 +
+                  tA.getSeconds()
+                ) % 3600
+              ) / 10);
+
+            const sweepDeg = activeMin * 6;
+            const pctOfCircle = sweepDeg / 360; // drawDockTopArc expects fraction of a full circle
+
+            drawDockTopArc(dockTop, slot, pctOfCircle, scheme.light, startDeg);
           }
         }
       }
@@ -578,7 +627,6 @@ function drawRow(g, r, y) {
     const sched = r.scheduledDepartureTime || r.departureTime || "";
     const eta   = stickyEta(r.vessel, r.estimatedArrivalTime, underway);
 
-
     // draw one label depending on state
     if (!underway && sched) {
 
@@ -631,7 +679,6 @@ function drawRow(g, r, y) {
         clear() { L.clear(); if (dockTop) dockTop.innerHTML = ""; if (capacity) capacity.innerHTML = ""; }
       };
     }
-
     // Fallback: create local overlay + rows inside #clockFace
     const svg = document.getElementById("clockFace");
     if (!svg) return null;
@@ -667,12 +714,14 @@ function drawRow(g, r, y) {
     if (attrs) for (const k in attrs) n.setAttribute(k, attrs[k]);
     return n;
   }
+
   function elText(text, x, y, { anchor = "start", fill = "#000", rotate = null } = {}) {
     const t = elNS("text", { x, y, "text-anchor": anchor, fill });
     if (rotate) t.setAttribute("transform", `rotate(${rotate[0]}, ${rotate[1]}, ${rotate[2]})`);
     t.textContent = text;
     return t;
   }
+
   function line(x1, y1, x2, y2, stroke, w) {
     return elNS("line", {
       x1, y1, x2, y2,
@@ -805,7 +854,8 @@ function vKey(v) {
     if (!(tD.getTime() > tA.getTime())) return null;
     const now = Date.now();
     const dwellMs   = tD.getTime() - tA.getTime();
-    const elapsedMs = Math.max(0, Math.min(dwellMs, now - tA.getTime()));
+    // Let elapsed time grow beyond scheduled departure; dock arc will cap at 60 minutes.
+    const elapsedMs = Math.max(0, now - tA.getTime());
     const dwellMin   = dwellMs   / 60000;
     const elapsedMin = elapsedMs / 60000;
     return { tA, tD, dwellMin, elapsedMin };
