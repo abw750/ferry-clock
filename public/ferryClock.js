@@ -9,15 +9,19 @@
     // color palette (all ferry visuals)
     const COLOR_STRONG_LTR = "#15a868ff"; // BI → SEA
     const COLOR_STRONG_RTL = "#e11b1bff"; // SEA → BI
+    const OPACITY = 0.8; // global transparency for arcs, bars, pies, arrows
     const COLOR_TRACK       = "#e5e7eb";
-
+       
     const COLORS = {
-    ltr:  { strong: COLOR_STRONG_LTR, light: COLOR_STRONG_LTR },
-    rtl:  { strong: COLOR_STRONG_RTL, light: COLOR_STRONG_RTL },
-    track: COLOR_TRACK
+      ltr:  { strong: COLOR_STRONG_LTR, light: COLOR_STRONG_LTR },
+      rtl:  { strong: COLOR_STRONG_RTL, light: COLOR_STRONG_RTL },
+      track: COLOR_TRACK,
+      opacity: OPACITY
     };
+    // unified opacity for all ferry visuals
+    COLORS.opacity = 0.8;
 
-        // WSDOT terminal IDs
+    // WSDOT terminal IDs
     const TERM_BI  = 3; // Bainbridge Island
     const TERM_SEA = 7; // Seattle
 
@@ -37,8 +41,13 @@
 
     container.appendChild(elNS("path", {
         d: `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`,
-        stroke: color, "stroke-width": 7, fill: "none", "stroke-linecap": STROKE_CAP
+        stroke: color,
+        "stroke-width": 7,
+        fill: "none",
+        "stroke-linecap": STROKE_CAP,
+        "stroke-opacity": 0.8
     }));
+
   }
     // ship icon settings
     const ICON_SRC  = "/icons/ferry.png";
@@ -213,14 +222,6 @@ function assignSlots(rows) {
   saveSlotMap(_slotByVessel);
 }
 
-// Optional: manual reset from DevTools console, then hard-reload
-window.ferryResetSlots = function ferryResetSlots() {
-  try { localStorage.removeItem("ferrySlotMap"); } catch {}
-  for (const k in _slotByVessel) delete _slotByVessel[k];
-  console.log("[ferry] slot map cleared; will reassign deterministically on next render");
-};
-
-
   // --- public API ---
     window.ferry = {
     setData(rows) {
@@ -258,26 +259,38 @@ window.ferryResetSlots = function ferryResetSlots() {
     if (!slotRows[0] && _rows[0]) slotRows[0] = _rows[0];
     if (!slotRows[1] && _rows[1]) slotRows[1] = _rows[1];
 
-    // hard de-duplication: never show the same vessel in both slots
+    // hard de-duplication: never show the same vessel in both slots (transition-safe)
     if (slotRows[0]?.vessel && slotRows[1]?.vessel &&
-        String(slotRows[0].vessel).trim() === String(slotRows[1].vessel).trim()) {
+        vKey(slotRows[0].vessel) === vKey(slotRows[1].vessel)) {
 
-      const dupName = String(slotRows[0].vessel).trim();
+      const dup = vKey(slotRows[0].vessel);
 
-      // prefer replacing the bottom slot with the earliest alternative that is not the duplicate
-      const replacement = earliestUpcoming(_rows, dupName);
+      // Prefer a replacement with a different vessel name and (if possible) a different destination
+      const avoidDest = toNum(slotRows[0]?.destinationTerminalId);
+      let replacement = (_rows || []).find(r =>
+        vKey(r?.vessel) && vKey(r.vessel) !== dup &&
+        (toNum(r?.destinationTerminalId) == null || toNum(r.destinationTerminalId) !== avoidDest)
+      );
 
-      // if no alternative is available, try a dock snapshot of any other mapped vessel
-      const vsList = vesselsBySlot().filter(v => v && v !== dupName);
-      const snap = vsList.length ? getDockSnapshot(vsList[0]) : null;
-
-      slotRows[1] = replacement || snap || null;
-
-      // if still null, keep only the top slot populated and leave bottom empty
-      if (!slotRows[1]) {
-        console.warn("[ferry] de-dup: only one vessel available; hiding duplicate in bottom slot:", dupName);
+      // If none, try any other vessel
+      if (!replacement) {
+        replacement = (_rows || []).find(r => vKey(r?.vessel) && vKey(r.vessel) !== dup) || null;
       }
-    }
+
+      // If still none, try a dock snapshot of *any* other mapped vessel
+      if (!replacement) {
+        const others = vesselsBySlot().filter(v => v && vKey(v) !== dup);
+        if (others.length) replacement = getDockSnapshot(others[0]) || null;
+      }
+
+      // Apply: replace bottom; if no candidate, hide bottom
+      slotRows[1] = replacement || null;
+
+      if (!slotRows[1]) {
+        console.warn("[ferry] de-dup: hiding duplicate bottom slot during transition");
+      }
+}
+
 
 
       // 12 o'clock dock arcs: only when docked. No track when underway.
@@ -367,44 +380,41 @@ window.__capSticky = loadCapSticky() || {
   BI:  { total: null, avail: null, tTotal: 0, tAvail: 0 }
 };
 
+// Hold last-known-good values for brief feed drops
+const STICKY_TTL_MS = 300000; // 5 minutes
+
 // Returns sticky values; never force 0 on brief nulls
 function sticky(originKey, nextTotal, nextAvail) {
-  const rec = window.__capSticky[originKey] || { total: null, avail: null, tTotal: 0, tAvail: 0 };
+  const s = window.__capSticky[originKey];
   const now = Date.now();
 
-  // independent clocks for total vs avail
-  const SOFT_TTL_AVAIL_MS = 5 * 60 * 1000;  // keep last avail up to 5 min
-  const HARD_TTL_AVAIL_MS = 20 * 60 * 1000; // drop after 20 min with no updates
-
-  // TOTAL: accept any finite value immediately
+  // TOTAL: accept only finite non-negative; otherwise keep last good
   if (Number.isFinite(nextTotal) && nextTotal >= 0) {
-    rec.total = nextTotal;
-    rec.tTotal = now;
+    s.total = nextTotal;
+    s.ts = now;
   }
 
-  // AVAIL: accept any finite value immediately
+  // AVAIL: accept finite non-negative; otherwise keep last within TTL
   if (Number.isFinite(nextAvail) && nextAvail >= 0) {
-    rec.avail = nextAvail;
-    rec.tAvail = now;
+    s.avail = nextAvail;
+    s.ts = now;
+  } else if (s.avail != null && (now - s.ts) <= STICKY_TTL_MS) {
+    // keep last avail within TTL
   } else {
-    // feed has null/zero/NaN: keep last known within TTL windows
-    const age = now - rec.tAvail;
-    if (rec.avail != null) {
-      // keep last for soft window; after hard window, mark unknown (null), do NOT force 0
-      if (age > HARD_TTL_AVAIL_MS) rec.avail = null;
-    }
+    // leave as-is (null) rather than forcing 0
+    s.avail = s.avail ?? null;
   }
 
-  window.__capSticky[originKey] = rec;
-  saveCapSticky(window.__capSticky);
+  // Output: once a good TOTAL exists, never drop to 0 during brief blips
+  const outTotal =
+    Number.isFinite(s.total) ? s.total
+    : (Number.isFinite(s.avail) && s.avail > 0 ? s.avail : 0);
 
-  // Outputs: numbers; when unknown, fall back to 0 total/avail for drawing but avoid
-  // sudden zeroing during soft outages because rec.avail is preserved above.
-  const outTotal = Number.isFinite(rec.total) ? Math.max(0, rec.total) : 0;
-  const outAvail = Number.isFinite(rec.avail) ? Math.max(0, rec.avail) : 0;
+  const outAvail =
+    Number.isFinite(s.avail) ? Math.max(0, s.avail) : 0;
+
   return { total: outTotal, avail: outAvail };
 }
-
 
   // --- SEA (right pie) ---
   {
@@ -518,10 +528,18 @@ function drawRow(g, r, y) {
       if (pct != null) {
         if (dir === "ltr") {
           xp = xL + (xR - xL) * pct;
-          g.appendChild(line(xL, barY, xp, barY, scheme.strong, 6)); // colored fill
+        {
+          const seg = line(xL, barY, xp, barY, scheme.strong, 6);
+          seg.setAttribute("stroke-opacity", "0.8");
+          g.appendChild(seg);
+        }
         } else {
           xp = xR - (xR - xL) * pct;
-          g.appendChild(line(xR, barY, xp, barY, scheme.strong, 6)); // colored fill
+        {
+          const seg = line(xR, barY, xp, barY, scheme.strong, 6);
+          seg.setAttribute("stroke-opacity", "0.8");
+          g.appendChild(seg);
+        }
         }
       } else {
         // progress unknown briefly after depart → park dot at origin side
@@ -656,7 +674,14 @@ function drawRow(g, r, y) {
     return t;
   }
   function line(x1, y1, x2, y2, stroke, w) {
-    return elNS("line", { x1, y1, x2, y2, stroke, "stroke-width": w, "stroke-linecap": "round" });
+    return elNS("line", {
+      x1, y1, x2, y2,
+      stroke,
+      "stroke-width": w,
+      "stroke-linecap": "round",
+      "stroke-opacity": 0.8
+    });
+
   }
   function arrowHead(x, y, angleRad, stroke, w, size) {
     const s = size || 8;
@@ -666,7 +691,11 @@ function drawRow(g, r, y) {
     const p2y = y + Math.sin(angleRad + Math.PI + 0.9) * s;
     return elNS("path", {
       d: `M ${x} ${y} L ${p1x} ${p1y} M ${x} ${y} L ${p2x} ${p2y}`,
-      stroke, "stroke-width": w, fill: "none", "stroke-linecap": "round"
+      stroke,
+      "stroke-width": w,
+      fill: "none",
+      "stroke-linecap": "round",
+      "stroke-opacity": 0.8
     });
   }
   function circleDot(x, y, r, stroke) {
@@ -694,6 +723,14 @@ function drawRow(g, r, y) {
     return node;
   }
   function toNum(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
+
+  // normalize vessel names for strict comparisons
+function vKey(v) {
+  return String(v || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^m\/?v\.?\s+/i, ""); // drop "M/V ", "MV ", etc.
+}
 
   // --- time + progress helpers ---
     // core hh:mm AM/PM → Date parser using a provided base day
@@ -837,12 +874,14 @@ function drawCapacityPie(g, cx, cy, r, total, avail, color) {
       fill: "none",
       stroke: "#ddd",
       "stroke-width": RING_W,
-      "stroke-linecap": STROKE_CAP
+      "stroke-linecap": STROKE_CAP,
+      "stroke-opacity": 0.8
     }));
     // white center to force donut look on non-white backgrounds
     g.appendChild(elNS("circle", {
       cx, cy, r: Math.max(1, r - RING_W * 0.5 - 1),
-      fill: "#fff", stroke: "none"
+      fill: "#fff", stroke: "none",
+      opacity: COLORS.opacity
     }));
     // label
     const txt = elNS("text", { x: cx, y: cy + 4, "text-anchor": "middle", fill: "#888", "font-size": "12", "font-weight": "600" });
@@ -857,7 +896,8 @@ function drawCapacityPie(g, cx, cy, r, total, avail, color) {
     fill: "none",
     stroke: COLORS.track,
     "stroke-width": RING_W,
-    "stroke-linecap": STROKE_CAP
+    "stroke-linecap": STROKE_CAP,
+    "stroke-opacity": 0.8
   }));
 
     // availability as an arc along the ring, starting at 12 o'clock
@@ -866,22 +906,16 @@ function drawCapacityPie(g, cx, cy, r, total, avail, color) {
     const sweep = Math.min(359.9, frac * 360);
     if (sweep > 0) {
     const path = elNS("path", {
-        d: arcPath(cx, cy, r, -90, sweep),
-
+      d: arcPath(cx, cy, r, -90, sweep),
       fill: "none",
       stroke: color,
       "stroke-width": RING_W,
-      "stroke-linecap": STROKE_CAP
+      "stroke-linecap": STROKE_CAP,
+      "stroke-opacity": 0.8
     });
+
     g.appendChild(path);
   }
-
-  // white center so it reads as a donut regardless of page background
-  g.appendChild(elNS("circle", {
-    cx, cy, r: Math.max(1, r - RING_W * 0.5 - 1),
-    fill: "#fff",
-    stroke: "none"
-  }));
 
   // numeric label = available count
   const txt = elNS("text", {
