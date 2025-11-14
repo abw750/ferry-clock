@@ -4,22 +4,18 @@
     const CX = 200;
     const CY = 200;
     const RIM_OUTER = 182;                 // outer dial radius
-    const RIM_INNER = Math.round(RIM_OUTER * 0.56); // inward offset for labels/pies
+    const RIM_INNER = Math.round(RIM_OUTER * 0.56); // inward offset for labels/pies e.g. BI and Seattle and Capacity pies.
 
     // color palette (all ferry visuals)
-    const COLOR_STRONG_LTR = "#15a868ff"; // BI → SEA
-    const COLOR_STRONG_RTL = "#e11b1bff"; // SEA → BI
-    const OPACITY = 0.8; // global transparency for arcs, bars, pies, arrows
-    const COLOR_TRACK       = "#e5e7eb";
+    const COLOR_STRONG_LTR = "#15a868ce"; // BI → SEA
+    const COLOR_STRONG_RTL = "#e11b1bd0"; // SEA → BI
+    const COLOR_TRACK       = "#e5e7eba0";
        
     const COLORS = {
       ltr:  { strong: COLOR_STRONG_LTR, light: COLOR_STRONG_LTR },
       rtl:  { strong: COLOR_STRONG_RTL, light: COLOR_STRONG_RTL },
       track: COLOR_TRACK,
-      opacity: OPACITY
     };
-    // unified opacity for all ferry visuals
-    COLORS.opacity = 0.8;
 
     // WSDOT terminal IDs
     const TERM_BI  = 3; // Bainbridge Island
@@ -45,7 +41,6 @@
         "stroke-width": 7,
         fill: "none",
         "stroke-linecap": STROKE_CAP,
-        "stroke-opacity": 0.8
     }));
 
   }
@@ -579,14 +574,12 @@ function drawRow(g, r, y) {
           xp = xL + (xR - xL) * pct;
         {
           const seg = line(xL, barY, xp, barY, scheme.strong, 6);
-          seg.setAttribute("stroke-opacity", "0.8");
           g.appendChild(seg);
         }
         } else {
           xp = xR - (xR - xL) * pct;
         {
           const seg = line(xR, barY, xp, barY, scheme.strong, 6);
-          seg.setAttribute("stroke-opacity", "0.8");
           g.appendChild(seg);
         }
         }
@@ -727,8 +720,7 @@ function drawRow(g, r, y) {
       x1, y1, x2, y2,
       stroke,
       "stroke-width": w,
-      "stroke-linecap": "round",
-      "stroke-opacity": 0.8
+      "stroke-linecap": "round"
     });
 
   }
@@ -743,8 +735,7 @@ function drawRow(g, r, y) {
       stroke,
       "stroke-width": w,
       fill: "none",
-      "stroke-linecap": "round",
-      "stroke-opacity": 0.8
+      "stroke-linecap": "round"
     });
   }
   function circleDot(x, y, r, stroke) {
@@ -924,14 +915,12 @@ function drawCapacityPie(g, cx, cy, r, total, avail, color) {
       fill: "none",
       stroke: "#ddd",
       "stroke-width": RING_W,
-      "stroke-linecap": STROKE_CAP,
-      "stroke-opacity": 0.8
+      "stroke-linecap": STROKE_CAP
     }));
     // white center to force donut look on non-white backgrounds
     g.appendChild(elNS("circle", {
       cx, cy, r: Math.max(1, r - RING_W * 0.5 - 1),
       fill: "#fff", stroke: "none",
-      opacity: COLORS.opacity
     }));
     // label
     const txt = elNS("text", { x: cx, y: cy + 4, "text-anchor": "middle", fill: "#888", "font-size": "12", "font-weight": "600" });
@@ -946,8 +935,15 @@ function drawCapacityPie(g, cx, cy, r, total, avail, color) {
     fill: "none",
     stroke: COLORS.track,
     "stroke-width": RING_W,
-    "stroke-linecap": STROKE_CAP,
-    "stroke-opacity": 0.8
+    "stroke-linecap": STROKE_CAP
+  }));
+
+  // solid white center to keep donut look
+  g.appendChild(elNS("circle", {
+    cx, cy,
+    r: Math.max(1, r - RING_W * 0.5 - 1),
+    fill: "#fff",
+    stroke: "none"
   }));
 
     // availability as an arc along the ring, starting at 12 o'clock
@@ -960,8 +956,7 @@ function drawCapacityPie(g, cx, cy, r, total, avail, color) {
       fill: "none",
       stroke: color,
       "stroke-width": RING_W,
-      "stroke-linecap": STROKE_CAP,
-      "stroke-opacity": 0.8
+      "stroke-linecap": STROKE_CAP
     });
 
     g.appendChild(path);
