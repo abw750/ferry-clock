@@ -102,6 +102,15 @@ function updateDockState(summary, liveByVessel, arrivedByVessel) {
     });
   }
 
+  // Also include vessels that have a recorded arrival (including synthetic),
+  // even if they are temporarily missing from summary/live maps.
+  if (arrivedByVessel && typeof arrivedByVessel === "object") {
+    Object.keys(arrivedByVessel).forEach((raw) => {
+      const v = String(raw || "").trim();
+      if (v) names.add(v);
+    });
+  }
+
   names.forEach((name) => {
     if (!name) return;
 
@@ -864,7 +873,9 @@ function buildCanonicalState() {
 
     // Boot-time synthetic path:
     // If the vessel is currently at dock and we have a scheduled departure for this lane,
-    // approximate dockStart as (scheduled departure - 25 minutes).
+    // approximate dockStart as (scheduled departure - 25 minutes), but only
+    // *once* per dock cycle. Persist the first synthetic anchor into dockState
+    // so later schedule rollovers do not move the dockStart forward.
     if (!dockStartTime) {
       const live = liveByVessel && name in liveByVessel ? liveByVessel[name] : null;
       const atDock = live ? !!live.atDock : false;
@@ -877,11 +888,24 @@ function buildCanonicalState() {
         const synthMs = dep.getTime() - SYNTH_DWELL_MIN * 60 * 1000;
         const dt = new Date(synthMs);
         if (Number.isFinite(dt.getTime())) {
-          dockStartTime = dt.toISOString();
+          const iso = dt.toISOString();
+          dockStartTime = iso;
           dockStartSource = "synthetic-boot";
+
+          // Persist synthetic anchor once per vessel so we don’t
+          // recompute it on later polls when the schedule rolls forward.
+          if (byVessel) {
+            const existing = byVessel[name] || {};
+            if (!existing.dockStartMs) {
+              existing.dockStartMs = dt.getTime();
+              existing.dockStartIsSynthetic = true;
+              byVessel[name] = existing;
+            }
+          }
         }
       }
     }
+
 
     if (!dockStartTime && !arrivalTime) {
       return EMPTY;

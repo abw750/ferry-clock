@@ -7,8 +7,8 @@
     const RIM_INNER = Math.round(RIM_OUTER * 0.56); // inward offset for labels/pies e.g. BI and Seattle and Capacity pies.
 
     // color palette (all ferry visuals)
-    const COLOR_STRONG_LTR = "#15a868ce"; // BI → SEA
-    const COLOR_STRONG_RTL = "#e11b1bd0"; // SEA → BI
+    const COLOR_STRONG_LTR = "#1c9560a7"; // BI → SEA
+    const COLOR_STRONG_RTL = "#ff2121b9"; // SEA → BI
     const COLOR_TRACK       = "#e5e7eba0";
        
     const COLORS = {
@@ -369,42 +369,25 @@ function assignSlots(rows) {
       if (snap1) slotRows[1] = snap1;
     }
 
+    // final safety: never let a slot adopt a row for the wrong vessel,
+    // and never allow the same vessel to occupy both slots.
+    // Each slot has exactly one "home" vessel per _slotByVessel; if the
+    // feed lies, we blank the conflicting slot and let dock cache / future
+    // polls fill it in.
+    if (slotRows[0] && vs[0] && vKey(slotRows[0].vessel) !== vKey(vs[0])) {
+      slotRows[0] = null;
+    }
+    if (slotRows[1] && vs[1] && vKey(slotRows[1].vessel) !== vKey(vs[1])) {
+      slotRows[1] = null;
+    }
 
-    // final safety
-    if (!slotRows[0] && _rows[0]) slotRows[0] = _rows[0];
-    if (!slotRows[1] && _rows[1]) slotRows[1] = _rows[1];
-
-    // hard de-duplication: never show the same vessel in both slots (transition-safe)
+    // If both slots still resolve to the same vessel after that, hide slot 1.
     if (slotRows[0]?.vessel && slotRows[1]?.vessel &&
         vKey(slotRows[0].vessel) === vKey(slotRows[1].vessel)) {
+      console.warn("[ferry] duplicate vessel in both slots; hiding bottom slot and preserving top as source of truth");
+      slotRows[1] = null;
+    }
 
-      const dup = vKey(slotRows[0].vessel);
-
-      // Prefer a replacement with a different vessel name and (if possible) a different destination
-      const avoidDest = toNum(slotRows[0]?.destinationTerminalId);
-      let replacement = (_rows || []).find(r =>
-        vKey(r?.vessel) && vKey(r.vessel) !== dup &&
-        (toNum(r?.destinationTerminalId) == null || toNum(r.destinationTerminalId) !== avoidDest)
-      );
-
-      // If none, try any other vessel
-      if (!replacement) {
-        replacement = (_rows || []).find(r => vKey(r?.vessel) && vKey(r.vessel) !== dup) || null;
-      }
-
-      // If still none, try a dock snapshot of *any* other mapped vessel
-      if (!replacement) {
-        const others = vesselsBySlot().filter(v => v && vKey(v) !== dup);
-        if (others.length) replacement = getDockSnapshot(others[0]) || null;
-      }
-
-      // Apply: replace bottom; if no candidate, hide bottom
-      slotRows[1] = replacement || null;
-
-      if (!slotRows[1]) {
-        console.warn("[ferry] de-dup: hiding duplicate bottom slot during transition");
-      }
-}
 
       // 12 o'clock dock arcs: only when docked. No track when underway.
       if (dockTop) {
