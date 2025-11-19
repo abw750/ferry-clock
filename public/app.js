@@ -60,6 +60,79 @@ function validateSummary(arr) {
   return cleaned.length ? cleaned : null;
 }
 
+// Adapter: canonical /api/state payload → row array used by table + ferry
+function canonicalToRowsFromState(state) {
+  if (!state || typeof state !== "object") return [];
+
+  const terminalMapping = state.terminalMapping || {};
+  const capacity = state.capacity || {};
+  const liveStatus = state.liveStatus || {};
+  const selection = state.userRouteSelection || {};
+
+  const westId = Number(terminalMapping.terminalID_West) || null;
+  const eastId = Number(terminalMapping.terminalID_East) || null;
+
+  function makeRow(laneKey, capKey) {
+    const ls = liveStatus[laneKey] || null;
+    if (!ls) return null;
+
+    let originId = Number(ls.originTerminalId) || null;
+    let destId   = Number(ls.destinationTerminalId) || null;
+
+    // Fallbacks if IDs missing
+    if (!originId && laneKey === "upper" && westId) originId = westId;
+    if (!originId && laneKey === "lower" && eastId) originId = eastId;
+    if (!destId && originId && westId && eastId) {
+      destId = originId === westId ? eastId : westId;
+    }
+
+    // Direction label
+    let direction = null;
+    if (originId && destId) {
+      const from =
+        originId === westId ? (selection.terminalNameWest || "West") :
+        originId === eastId ? (selection.terminalNameEast || "East") :
+        null;
+
+      const to =
+        destId === eastId ? (selection.terminalNameEast || "East") :
+        destId === westId ? (selection.terminalNameWest || "West") :
+        null;
+
+      if (from && to) direction = `${from} \u2192 ${to}`;
+    }
+
+    const cap = capacity[capKey] || {};
+    const carSlotsTotal =
+      Number.isFinite(+cap.maxAuto) ? +cap.maxAuto : null;
+    const carSlotsAvailable =
+      Number.isFinite(+cap.availAuto) ? +cap.availAuto : null;
+
+    return {
+      vessel: ls.vesselName || null,
+      direction,
+      departureTime: ls.departureLabel || ls.scheduledDeparture || null,
+      estimatedArrivalTime: ls.eta || null,
+      actualArrivalTime: ls.actualArrival || null,
+      carSlotsTotal,
+      carSlotsAvailable,
+      scheduledDepartureTime: ls.scheduledDeparture || null,
+      actualDepartureTime: ls.actualDeparture || null,
+      status: ls.status || null,
+      originTerminalId: originId,
+      destinationTerminalId: destId
+    };
+  }
+
+  const upperRow = makeRow("upper", "west");
+  const lowerRow = makeRow("lower", "east");
+
+  const out = [];
+  if (upperRow) out.push(upperRow);
+  if (lowerRow) out.push(lowerRow);
+  return out;
+}
+
 // normalize actual-arrival field from API, with key scan fallback
 function getActualArrival(r) {
   // common names first
@@ -159,22 +232,27 @@ async function fetchAndRender() {
     return;
   }
 
-  // try live summary
-  let summary = await getJson("/api/summary");
-  let good = validateSummary(summary);
+  // try live canonical state
+  const state = await getJson("/api/state");
+  const rowsFromState = state ? canonicalToRowsFromState(state) : null;
+  const good = validateSummary(rowsFromState);
 
   if (good) {
     ensureTable();
     renderSummaryTable(good);
     try {
-      if (window.ferry?.setData && window.ferry?.render) {
+      if (typeof window.updateFerryFromCanonical === "function") {
+        // Preferred: drive ferry via canonical state
+        window.updateFerryFromCanonical(state);
+      } else if (window.ferry?.setData && window.ferry?.render) {
+        // Fallback: drive directly with derived rows
         window.ferry.setData(good);
         window.ferry.render();
       } else if (typeof window.updateFerryClock === "function") {
         window.updateFerryClock(good);
       }
     } catch (e) {
-      console.warn("ferry render failed:", e);
+      console.warn("ferry render failed (state):", e);
     }
     els.count.textContent = `${good.length} rows`;
     saveLastGood(good);

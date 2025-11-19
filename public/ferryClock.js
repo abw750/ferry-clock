@@ -25,7 +25,7 @@
     const DOCK_OUTER_R = RIM_OUTER - 9;  // 182 - 9 = 173
     const DOCK_INNER_R = RIM_OUTER - 17; // 182 - 17 = 165
 
-  function drawDockTopArc(container, slotIndex, pct, color, startDeg) {
+  function drawDockArc(container, slotIndex, pct, color, startDeg) {
     const r = slotIndex === 0 ? DOCK_OUTER_R : DOCK_INNER_R;
     if (pct == null) return;
 
@@ -64,6 +64,113 @@
     // capacity pie geometry
     const CAP_PIE_R = 15;           // radius in px
     const CAP_PIE_X_OFFSET = 28;    // horizontal offset from RIM_INNER
+
+    // Canonical FerryClock2 state fetch — non-invasive observer for now
+    async function fetchCanonicalState() {
+      try {
+        const res = await fetch("/api/state", {
+          headers: { "accept": "application/json" },
+          cache: "no-store"
+        });
+
+        if (!res.ok) {
+          console.warn("[ferryClock] /api/state returned", res.status);
+          return;
+        }
+
+        const state = await res.json();
+        console.log("[ferryClock] canonical state", state);
+
+        // Expose for debugging / future migration
+        window.__ferryState = state;
+
+        // Derive legacy-style row array from canonical state (for inspection only)
+        const rows = canonicalToRows(state);
+        console.log("[ferryClock] canonical→rows", rows);
+        window.__ferryRows = rows;
+      } catch (err) {
+        console.warn("[ferryClock] /api/state fetch failed", err);
+      }
+    }
+
+    // Adapter: canonical FerryClock2 state → legacy row array shape
+    function canonicalToRows(state) {
+      if (!state) return [];
+
+      const terminalMapping = state.terminalMapping || {};
+      const capacity = state.capacity || {};
+      const liveStatus = state.liveStatus || {};
+
+      const westId = Number(terminalMapping.terminalID_West) || null;
+      const eastId = Number(terminalMapping.terminalID_East) || null;
+
+      function makeRow(laneKey, capKey) {
+        const ls = liveStatus[laneKey] || null;
+        if (!ls) return null;
+
+        let originId = Number(ls.originTerminalId) || null;
+        let destId = Number(ls.destinationTerminalId) || null;
+
+        // Fallbacks if IDs missing
+        if (!originId && laneKey === "upper" && westId) originId = westId;
+        if (!originId && laneKey === "lower" && eastId) originId = eastId;
+        if (!destId && originId && westId && eastId) {
+          destId = originId === westId ? eastId : westId;
+        }
+
+        // Direction label
+        let direction = null;
+        if (originId && destId) {
+          const from =
+            originId === westId ? (state.userRouteSelection?.terminalNameWest || "West") :
+            originId === eastId ? (state.userRouteSelection?.terminalNameEast || "East") :
+            null;
+          const to =
+            destId === eastId ? (state.userRouteSelection?.terminalNameEast || "East") :
+            destId === westId ? (state.userRouteSelection?.terminalNameWest || "West") :
+            null;
+          if (from && to) direction = `${from} \u2192 ${to}`;
+        }
+
+        const cap = capacity[capKey] || {};
+        const carSlotsTotal = Number.isFinite(+cap.maxAuto) ? +cap.maxAuto : null;
+        const carSlotsAvailable = Number.isFinite(+cap.availAuto) ? +cap.availAuto : null;
+
+        return {
+          vessel: ls.vesselName || null,
+          direction,
+          departureTime: ls.departureLabel || ls.scheduledDeparture || null,
+          estimatedArrivalTime: ls.eta || null,
+          actualArrivalTime: ls.actualArrival || null,
+          carSlotsTotal,
+          carSlotsAvailable,
+          scheduledDepartureTime: ls.scheduledDeparture || null,
+          actualDepartureTime: ls.actualDeparture || null,
+          status: ls.status || null,
+          originTerminalId: originId,
+          destinationTerminalId: destId,
+
+          // Cannon Dock passthrough fields from canonical liveStatus (no behavior change yet)
+          atDock: (typeof ls.atDock === "boolean") ? ls.atDock : null,
+          phase: ls.phase || null, // e.g. "docked" | "underway" | "unknown"
+          dockStartTime: ls.dockStartTime || null,
+          dockStartIsSynthetic: (typeof ls.dockStartIsSynthetic === "boolean") ? ls.dockStartIsSynthetic : null,
+          dockArcFraction:
+            typeof ls.dockArcFraction === "number" && Number.isFinite(ls.dockArcFraction)
+              ? ls.dockArcFraction
+              : null,
+          arrivalTime: ls.arrivalTime || null
+        };
+      }
+
+      const upperRow = makeRow("upper", "west");
+      const lowerRow = makeRow("lower", "east");
+
+      const out = [];
+      if (upperRow) out.push(upperRow);
+      if (lowerRow) out.push(lowerRow);
+      return out;
+    }
 
   // strict actual-arrival accessor (no ETA fallback)
   function getActualArrivalLocal(r) {
@@ -303,6 +410,7 @@ function assignSlots(rows) {
       if (dockTop) {
         for (let slot = 0; slot <= 1; slot++) {
           const rr = slotRows[slot];
+
           // infer direction
           let dir = null;
           if (rr) {
@@ -310,17 +418,25 @@ function assignSlots(rows) {
             if (s.includes("bainbridge") && s.includes("seattle")) {
               dir = s.indexOf("bainbridge") < s.indexOf("seattle") ? "ltr" : "rtl";
             } else {
-                const from = Number(rr.originTerminalId), to = Number(rr.destinationTerminalId);
-                if (from === TERM_BI && to === TERM_SEA) dir = "ltr";
-                if (from === TERM_SEA && to === TERM_BI) dir = "rtl";
+              const from = Number(rr.originTerminalId), to = Number(rr.destinationTerminalId);
+              if (from === TERM_BI && to === TERM_SEA) dir = "ltr";
+              if (from === TERM_SEA && to === TERM_BI) dir = "rtl";
             }
           }
           const scheme = dir === "ltr" ? COLORS.ltr : COLORS.rtl;
-          const statusText = String(rr?.status || "").toLowerCase();
-          // robust dock detection: WSDOT sends "scheduled" even when actually at dock
-          const nowMs = Date.now();
-          const schedMs = parseNextOccurrence(rr?.scheduledDepartureTime)?.getTime() || null;
 
+          // --- Cannon Dock: prefer canonical atDock/dockArcFraction when present ---
+          const canonAtDock =
+            rr && typeof rr.atDock === "boolean" ? rr.atDock : null;
+          const canonFrac =
+            rr && Number.isFinite(+rr.dockArcFraction)
+              ? clamp01(+rr.dockArcFraction)
+              : null;
+
+          // legacy heuristic (unchanged) as fallback
+          const nowMs = Date.now();
+          const schedMs =
+            parseNextOccurrence(rr?.scheduledDepartureTime)?.getTime() || null;
           const arrStr = getActualArrivalLocal(rr);
           const arrPrev = arrStr ? parsePrevOccurrence(arrStr)?.getTime() : null;
 
@@ -329,47 +445,73 @@ function assignSlots(rows) {
           // - scheduled departure is still in the future
           // - AND either actual arrival is null OR arrival is in the past
           // - AND not underway (no ETA)
-          const docked =
+          const heuristicDocked =
+            !!rr &&
             !rr.actualDepartureTime &&
             schedMs && schedMs > nowMs &&
             (!rr.estimatedArrivalTime || rr.estimatedArrivalTime === "—") &&
             (arrPrev == null || arrPrev < nowMs);
 
-
+          // If server says atDock === true, trust it; otherwise fall back to heuristic.
+          const docked = canonAtDock === true ? true : heuristicDocked;
 
           if (rr && docked) {
-            // For dock arcs, ignore departure time entirely.
-            // Use elapsed time since arrival, capped at 60 minutes.
-            const arriveStr = getActualArrivalLocal(rr);
-            let tA = arriveStr ? parsePrevOccurrence(arriveStr) : null;
+            let tA = null;
 
+            // If server provided a concrete dockStartTime, use it as the arc anchor.
+            if (rr.dockStartTime) {
+              const d = new Date(rr.dockStartTime);
+              if (!Number.isNaN(d.getTime())) {
+                tA = d;
+              }
+            }
+
+            // If we do not yet have a dockStartTime but we know an arrival,
+            // anchor the arc to the best-known arrival time (Cannon or legacy).
             if (!tA) {
-              // Fallback: assume arrival was DEFAULT_DWELL_MIN minutes ago.
+              const arrivalStr =
+                (typeof rr.arrivalTime === "string" && rr.arrivalTime) ||
+                arrStr ||
+                null;
+
+              if (arrivalStr) {
+                const arrivalDt = parsePrevOccurrence(arrivalStr);
+                if (
+                  arrivalDt instanceof Date &&
+                  !Number.isNaN(arrivalDt.getTime())
+                ) {
+                  tA = arrivalDt;
+                }
+              }
+            }
+
+            // Last resort if we still have no anchor time: synthetic dwell.
+            if (!tA) {
               tA = new Date(Date.now() - DEFAULT_DWELL_MIN * MIN_MS);
             }
 
+            // Always derive fraction from tA and now on the client
             const now = Date.now();
             const elapsedMin = Math.max(0, (now - tA.getTime()) / 60000);
-            const activeMin = Math.min(elapsedMin, 60); // cap at 60 minutes for a full circle
+            const cappedElapsed = Math.min(elapsedMin, 60);
+            const pctOfCircle = clamp01(cappedElapsed / 60);
 
-            // Start angle = arrival minute on the rim
+            // Start angle = dock start minute on the rim
             const startDeg =
               -90 +
               (
                 (
                   (tA.getHours() * 3600 +
-                  tA.getMinutes() * 60 +
-                  tA.getSeconds()
-                ) % 3600
-              ) / 10);
+                    tA.getMinutes() * 60 +
+                    tA.getSeconds()) % 3600
+                ) / 10
+              );
 
-            const sweepDeg = activeMin * 6;
-            const pctOfCircle = sweepDeg / 360; // drawDockTopArc expects fraction of a full circle
-
-            drawDockTopArc(dockTop, slot, pctOfCircle, scheme.light, startDeg);
+            drawDockArc(dockTop, slot, pctOfCircle, scheme.light, startDeg);
           }
         }
       }
+
       drawRow(top,    slotRows[0] || null, 95);
       drawRow(bottom, slotRows[1] || null, 305);
 
@@ -478,8 +620,19 @@ function sticky(originKey, nextTotal, nextAvail) {
 } // end if (capG)
 
     } // end render()
-  }; // end window.ferry
 
+  }; // end window.ferry
+  
+  // New entry point: drive ferry UI directly from canonical /api/state payload
+  window.updateFerryFromCanonical = function updateFerryFromCanonical(state) {
+    try {
+      const rows = canonicalToRows(state || null);
+      window.ferry.setData(rows);
+      window.ferry.render();
+    } catch (err) {
+      console.warn("[ferryClock] updateFerryFromCanonical failed", err);
+    }
+  };
 
   // Back-compat shim
   window.updateFerryClock = function updateFerryClock(summaryRows) {
@@ -832,6 +985,9 @@ function vKey(v) {
 
   // debug: mark renderer loaded
   console.log("[ferryClock] ready");
+
+  // Non-blocking probe of canonical backend state (FerryClock2)
+  fetchCanonicalState();
 
   // Dock window helper: returns arrival/depart times and minute counts
   function getDockWindow(actualArriveStr, schedDepartStr) {
